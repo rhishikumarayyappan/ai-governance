@@ -6,6 +6,8 @@
   (see Risk #4 in docs/BUILD_PLAN.md).
 """
 
+from contextlib import contextmanager
+
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -51,6 +53,25 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+@contextmanager
+def get_session():
+    """Context manager yielding a database session for non-API code.
+
+    Used by the testing engine, dashboard and SDK — anything that is not a
+    FastAPI request handler. Does NOT commit automatically: the caller is
+    responsible for calling ``session.commit()``. The session is always closed
+    on exit.
+
+    ``SessionLocal`` is looked up on each call, so tests can redirect the
+    database by monkeypatching ``governance.db.database.SessionLocal``.
+    """
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
 
 
 def init_db() -> None:
