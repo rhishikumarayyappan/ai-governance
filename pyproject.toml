@@ -17,6 +17,12 @@ dependencies = [
     "sqlalchemy>=2.0,<3.0",
     "pydantic>=2.7,<3.0",
     "pydantic-settings>=2.3,<3.0",
+    # Phase 1, Week 1. Upper bounds keep us on releases that still support
+    # Python 3.11 (numpy/scipy/pandas dropped 3.11 in their newest versions).
+    "numpy>=1.26,<2.5",
+    "scipy>=1.11,<1.18",
+    "pandas>=2.1,<3.1",
+    "scikit-learn>=1.4,<2.0",
 ]
 
 [project.optional-dependencies]
