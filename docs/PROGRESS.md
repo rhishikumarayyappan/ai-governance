@@ -52,6 +52,9 @@ Project:
   `GET /health`, includes the registry router.
 - `.gitignore`, `README.md`, `.env.example` written.
 - Git initialised, branch `main`, first commit `657f70a`.
+- GitHub CLI (`gh` 2.98.0) installed, authenticated as `rhishikumarayyappan`.
+  Remote `origin` → https://github.com/rhishikumarayyappan/ai-governance ,
+  rebased onto GitHub's initial commit, `main` pushed and tracking `origin/main`.
 
 **What works (verified)**
 - `GET /health` → `{"status": "ok", "version": "0.1.0"}` (200).
@@ -69,8 +72,6 @@ Project:
   verification only this session.
 - Everything Phase 1+: testing engine, adapters, bias metrics, compliance
   mapper, dashboard, reports, SDK — all stub files, no logic.
-- No GitHub remote configured yet (local repo only). Build plan calls for
-  pushing to GitHub — do this next session or when a remote is available.
 - Streamlit / fairlearn / shap / lime / scikit-learn / reportlab / garak / ollama
   not installed yet (deferred — see decision).
 
@@ -132,7 +133,7 @@ Session start next time:
 - [x] GET /api/v1/systems endpoint works
 - [x] POST /api/v1/systems endpoint works
 - [x] Git repository created with first commit
-- [ ] Pushed to GitHub *(no remote yet)*
+- [x] Pushed to GitHub (github.com/rhishikumarayyappan/ai-governance)
 
 ### Phase 1 — Testing Engine
 - [ ] Model adapter layer built (Sklearn, Pickle, API)
