@@ -1,133 +1,152 @@
 # AI Governance Platform — Progress Log
 
 ## Current Status
-- Phase: 0 — Foundation — **COMPLETE** (all exit criteria met and verified)
-- Started: September 2026
+- **Phase 1 Week 2 — COMPLETE**
+- Overall health: **Green**
+- **20 tests passing, 0 failures**
 - Last updated: 2026-09-01
+- Next: Phase 1 Week 3 — validation against published benchmarks (no new code)
 
 ---
 
 ## Session Log
 
-### Session 1 — 2026-09-01
+### Session 1 — 2026-09-01 — Phase 0 Foundation (COMPLETE)
+- Environment: Homebrew (pre-existing), pyenv 2.8.4 installed + wired into `~/.zshrc`,
+  Python 3.11.9 via pyenv (global), Poetry 2.1.4 with in-project venv.
+- Project scaffold per BUILD_PLAN.md. Phase 0 deps only (FastAPI, SQLAlchemy,
+  Pydantic, uvicorn; dev: pytest, httpx).
+- `governance/config.py`, `governance/db/database.py` (SQLite, WAL mode, FK on,
+  `SessionLocal`, `get_db`, `init_db`), `governance/db/models.py` (4 ORM models).
+- `governance/registry/` (schemas/service/router), `governance/main.py`
+  (`/health` + registry router, `init_db()` at import).
+- Git init, branch `main`, GitHub remote `origin`, first commits pushed.
 
-**What was done**
+### Session 2 — 2026-09-01 — Phase 1 Week 1: Model Adapter Layer
+- Added scikit-learn, pandas, numpy, scipy (upper-bounded for Python 3.11).
+- `governance/testing/adapters.py`: `ModelAdapter` interface, `SklearnAdapter`,
+  `PickleAdapter` (subclasses Sklearn → identical results), `APIAdapter`
+  (stdlib `urllib`, no new dep), `load_adapter()` factory.
+- `predict_proba()` returns 2D array or `None` cleanly, never raises.
+- `tests/test_adapters.py` — 5 tests. Committed `4d94239`.
 
-Environment:
-- Homebrew: already installed (5.1.12, Apple Silicon).
-- pyenv: installed via Homebrew (2.8.4). Added init block to `~/.zshrc`
-  (`PYENV_ROOT`, PATH, `pyenv init - zsh`). Verified it persists in a fresh
-  interactive shell.
-- Python: 3.11.9 installed via pyenv and set as the global default
-  (`python --version` → 3.11.9, from the pyenv shim).
-- Poetry: already installed (2.1.4, official installer at `~/.local/bin/poetry`).
-  Set `virtualenvs.in-project = true` so the env lives at `./.venv`.
+### Session 3 — 2026-09-01 — Phase 1 Week 2 Component 1: BiasTestSuite
+- Added fairlearn 0.14.0.
+- `governance/testing/bias.py`: `BiasTestResult` dataclass (4dp rounding,
+  strict status whitelist, `passed` property), `BiasTestSuite` with
+  `DEFAULT_THRESHOLDS` class attribute, `_get_status()` centralised threshold
+  logic, `run()` returns exactly 5 results in fixed order.
+- 5 metrics: demographic parity / equalized odds / equal opportunity (fairlearn),
+  predictive parity (manual sklearn `precision_score`), individual fairness
+  (fairlearn `MetricFrame` accuracy, **inverted threshold** — fail below 0.80).
+- Metric 1 `detail` carries per-group positive rates as a flat float dict.
+- `tests/test_bias.py` — 5 tests. Committed `f5dc37a`.
 
-Project:
-- Poetry project initialised in the existing `~/ai-governance` folder. Python
-  pinned to `>=3.11,<3.12`. Venv created at `./.venv` on Python 3.11.9.
-- Full folder/file structure created exactly per BUILD_PLAN.md (governance
-  package with db/registry/testing/compliance/reporting, dashboard/pages, sdk,
-  tests/fixtures, notebooks). Most files are empty stubs for later phases.
-- Dependencies installed (Phase 0 only — see decision below): fastapi 0.141.1,
-  uvicorn 0.52.4, sqlalchemy 2.0.52, pydantic 2.13.5, pydantic-settings 2.15.0,
-  plus dev: pytest 8.4.2, httpx 0.28.1. `poetry install` clean, no conflicts.
-  `poetry.lock` committed.
-- `governance/config.py`: pydantic-settings config (env prefix `AIGOV_`,
-  optional `.env`). Default DB path `~/ai-governance/ai_governance.db`.
-- `governance/db/database.py`: SQLite engine, `SessionLocal` factory, `get_db()`
-  FastAPI dependency, `init_db()`. WAL mode + `foreign_keys=ON` set on every
-  connection via a `connect` event listener. `check_same_thread=False` (safe:
-  short-lived per-request sessions).
-- `governance/db/models.py`: four ORM models — `AISystem`, `TestRun`,
-  `TestResult`, `ComplianceScore` — with all fields, JSON columns, string UUID
-  PKs, FKs with `ondelete=CASCADE`, and relationships wired both directions.
-  `risk_tier` is a real enum (`RiskTier`); other category fields are strings per
-  the plan.
-- `governance/registry/` — `schemas.py` (`AISystemCreate`, `AISystemRead`),
-  `service.py` (`list_systems`, `create_system`), `router.py` (APIRouter,
-  prefix `/api/v1`).
-- `governance/main.py`: FastAPI app, calls `init_db()` at startup (synchronous),
-  CORS middleware (localhost origins for the future Streamlit dashboard),
-  `GET /health`, includes the registry router.
-- `.gitignore`, `README.md`, `.env.example` written.
-- Git initialised, branch `main`, first commit `657f70a`.
-- GitHub CLI (`gh` 2.98.0) installed, authenticated as `rhishikumarayyappan`.
-  Remote `origin` → https://github.com/rhishikumarayyappan/ai-governance ,
-  rebased onto GitHub's initial commit, `main` pushed and tracking `origin/main`.
+### Session 4 — 2026-09-01 — Phase 1 Week 2 Component 2: Engine Orchestrator
+- `governance/testing/engine.py`: `run_bias_tests(system_id, model_source,
+  X_test, y_test, protected_attributes, config=None) -> str` and
+  `get_run_results(run_id) -> list[dict]`.
+- Staged: validate system_id (ValueError before any DB write) → open TestRun
+  "running" → load model → per-attribute BiasTestSuite → save TestResult rows →
+  close "complete". Model-load failure and top-level safety net both mark the
+  run "failed" (fresh session, idempotent) — a run is never stuck in "running".
+- Added `get_session()` context manager to `governance/db/database.py`.
+- `tests/conftest.py`: function-scoped `test_db` fixture — per-test temp SQLite,
+  own engine, fresh tables, `SessionLocal` monkeypatched. Real DB never touched.
+- `tests/test_engine.py` — 4 tests. Failure paths verified manually. Committed `4306bec`.
 
-**What works (verified)**
-- `GET /health` → `{"status": "ok", "version": "0.1.0"}` (200).
-- `GET /api/v1/systems` → `[]` when empty (200).
-- `POST /api/v1/systems` → 201, persists the record with a generated UUID and
-  `created_at`; created systems then appear in `GET /api/v1/systems`.
-- Tested both via FastAPI TestClient and against a live `uvicorn` server (curl).
-- SQLite confirmed in WAL mode (`PRAGMA journal_mode` → `wal`); data persists to
-  `ai_governance.db` and reads back correctly from a separate connection.
-- App tables auto-create on startup: `ai_systems`, `test_runs`, `test_results`,
-  `compliance_scores`.
+### Session 5 — 2026-09-01 — Phase 1 Week 2 Component 3: API endpoints (TODAY)
 
-**What does NOT work yet / not built**
-- No automated pytest tests yet (test files are empty stubs). Manual + TestClient
-  verification only this session.
-- Everything Phase 1+: testing engine, adapters, bias metrics, compliance
-  mapper, dashboard, reports, SDK — all stub files, no logic.
-- Streamlit / fairlearn / shap / lime / scikit-learn / reportlab / garak / ollama
-  not installed yet (deferred — see decision).
+**What was built today**
+- `governance/testing/schemas.py` — 3 Pydantic response models
+  (`TestRunResponse`, `TestRunResultsResponse`, `TestResultItem`), all
+  `from_attributes=True`.
+- `governance/testing/router.py` — 3 API endpoints (prefix `/api/v1`, tag
+  `testing`).
+- Router mounted in `governance/main.py`.
+- `tests/test_api_testing.py` — 6 tests (FastAPI TestClient + temp DB).
+- New dependency: `python-multipart` 0.0.32 (required by FastAPI for
+  form/file uploads).
 
-**Decisions made this session**
-1. **Phased dependency install** (confirmed with Rhishikumar). Only Phase 0 libs
-   installed now. `garak` and `alibi` are dependency-heavy and conflict-prone;
-   installing the full stack risked eating the 5-day Phase 0 window (Risk #3).
-   Each heavier group gets added at the start of the phase that first uses it.
-2. **`__init__.py` in every subpackage** under `governance/` and in `tests/`
-   (build plan only shows two explicitly, but Python needs them for imports).
-3. **Endpoints live in `governance/registry/`**, not inline in `main.py` — this
-   is exactly the module the build plan already defines, so no over-engineering,
-   and Phase 1 test-run endpoints will follow the same pattern.
-4. **Startup is synchronous** — `init_db()` is called at module load, no async
-   lifespan handler. Route handlers are plain `def` (FastAPI runs them in a
-   threadpool). Keeps to the "no async" rule.
-5. **Branch named `main`** (renamed from git's default `master`).
-6. **`risk_tier` is the only enum**; `model_type`, `sector`, `status`,
-   `regulation`, `module` are strings with allowed values documented inline —
-   matches how the build plan marks them.
-7. String UUID primary keys generated app-side (`str(uuid.uuid4())`).
+**What works right now (cumulative)**
+- Full project structure and SQLite database (WAL mode, 4 tables auto-created).
+- `GET /health` endpoint.
+- `GET` / `POST /api/v1/systems` — register and list AI systems.
+- Model adapter layer — `SklearnAdapter`, `PickleAdapter`, `APIAdapter`,
+  `load_adapter()`.
+- `BiasTestSuite` — 5 fairness metrics with threshold logic, inverted
+  threshold for individual fairness, per-group `detail`.
+- Engine orchestrator — creates `TestRun`, runs tests, saves `TestResult`
+  rows, handles all error cases (never leaves a run "running").
+- `POST /api/v1/test-runs` — accepts model upload (.pkl) and CSV, runs the
+  full bias test, returns a completed `TestRunResponse` (201).
+- `GET /api/v1/test-runs/{id}` — run status.
+- `GET /api/v1/test-runs/{id}/results` — 5 results.
+- Full test isolation — `ai_governance.db` is never touched by the test suite.
 
-**Known minor issues (non-blocking)**
-- `fastapi.testclient` emits a StarletteDeprecationWarning about httpx. Tests
-  still pass. Revisit when building the Phase 1 test suite.
+**What does NOT work yet**
+- Week 3 validation against published benchmarks (Adult Income, COMPAS, German
+  Credit).
+- Compliance mapper (Phase 2).
+- Streamlit dashboard (Phase 3).
+- PDF reports and SHAP (Phase 4).
+- SDK and demo (Phase 5).
 
----
+**Decisions made today**
+- Synchronous handlers (plain `def`) — consistent with the no-async rule;
+  `run_bias_tests` is fully synchronous, so `await` on uploads adds nothing.
+  Uploads read via `UploadFile.file.read()`.
+- Comma-separated string for `protected_attributes` — more reliable than
+  repeated `Form` fields across HTTP clients. Split on comma in the handler.
+- `ValueError` from the engine → HTTP 404; all other exceptions → HTTP 500
+  with `str(e)` as the `detail`, so every error response is readable (FastAPI's
+  default 500 has no body detail). The engine has already written "failed" to
+  the `TestRun` before re-raising, so there is no double-write risk.
+- Lazy `app` import inside the test `client` fixture — ensures `main.py`'s
+  module-level `init_db()` targets the temp database, not the real one.
+- 422 status passed as the literal `422` in the router (`HTTP_422_
+  UNPROCESSABLE_ENTITY` is deprecated / renamed in current Starlette).
 
-## Next Step — Phase 1, Week 1 (Model Adapter Layer)
+**Problems encountered and solved (Phase 1 to date)**
+1. Newest numpy / scipy / pandas releases dropped Python 3.11. Fixed by pinning
+   upper bounds (`numpy<2.5`, `scipy<1.18`, `pandas<3.1`); Poetry then selects
+   the newest 3.11-compatible versions (numpy 2.4.6, scipy 1.17.1, pandas 3.0.5).
+2. `attribute_name` could not live in metric 1's `detail` (a test requires every
+   value there to be a float 0–1). Put it in the `detail` of metrics 2–5 instead.
+3. Smoke test referenced `get_session()` which didn't exist — added it to
+   `database.py` as the standard non-API session helper.
+4. `RiskTier.HIGH` vs the actual lowercase enum members — used `RiskTier.high`.
+5. `X_test.drop(columns=protected_attributes)` raised `KeyError` on unknown
+   column names — added `errors="ignore"` (the per-attribute existence check
+   still does the warn-and-skip).
+6. Standalone scripts hit "no such table" because only the FastAPI app calls
+   `init_db()` — standalone entry points must call it explicitly.
+7. pytest tried to collect the `TestRun` / `TestResult` ORM classes as test
+   classes — import the `models` module, not the names, in test files.
+8. FastAPI form/file uploads need `python-multipart` — added it.
+9. API test isolation: `main.py` runs `init_db()` at import, which would hit the
+   real DB — solved with the lazy `app` import in the `client` fixture.
 
-Per BUILD_PLAN.md "Phase 1 — Testing Engine", Days 6–10:
+**Test results**
+`pytest tests/ -v` → **20 passed, 0 failed** (1 non-blocking StarletteDeprecation
+warning about httpx/TestClient, present since Phase 0).
 
-1. Add Phase 1 dependencies: `scikit-learn`, `pandas`, `numpy`, `scipy`,
-   `fairlearn`. (Hold `alibi` until actually needed.)
-2. Build the model adapter layer in `governance/testing/adapters.py`:
-   - `SklearnAdapter` — in-memory sklearn model
-   - `PickleAdapter` — serialised model file on disk
-   - `APIAdapter` — REST endpoint returning predictions
-   - Common interface: `.predict(X)` / `.predict_proba(X)`.
-3. Write `tests/test_bias.py` fixtures that load the UCI Adult Income dataset
-   (`sklearn.datasets.fetch_openml`).
-4. Also worth doing early: set up a GitHub remote and push (build plan Core
-   Principle — "save to GitHub after every meaningful change").
-
-Session start next time:
-"Read docs/BUILD_PLAN.md and docs/PROGRESS.md then continue where we left off."
+**Exact next step**
+Start **Phase 1 Week 3 — validation against three published datasets**. Open a
+fresh session, read `docs/BUILD_PLAN.md` and `docs/PROGRESS.md`, then run the
+Week 3 validation prompt. **Do not write new code in Week 3** — only run the
+existing engine against real data (UCI Adult Income, COMPAS/ProPublica, UCI
+German Credit) and verify the numbers match published benchmarks within 5%.
 
 ---
 
 ## Phase Completion Checklist
 
-### Phase 0 — Foundation
+### Phase 0 — Foundation — COMPLETE
 - [x] pyenv + Python 3.11 installed
 - [x] Poetry installed
 - [x] Project folder and structure created
-- [x] All dependencies installed via Poetry *(Phase 0 subset — phased plan)*
+- [x] All dependencies installed via Poetry *(phased plan)*
 - [x] SQLite database with 4 tables created
 - [x] GET /health endpoint works
 - [x] GET /api/v1/systems endpoint works
@@ -136,12 +155,29 @@ Session start next time:
 - [x] Pushed to GitHub (github.com/rhishikumarayyappan/ai-governance)
 
 ### Phase 1 — Testing Engine
-- [ ] Model adapter layer built (Sklearn, Pickle, API)
-- [ ] BiasTestSuite with 5 metrics built
-- [ ] Validated against UCI Adult Income (within 5% of published)
-- [ ] Validated against COMPAS dataset (within 5% of ProPublica)
-- [ ] All metrics have pytest tests
-- [ ] Results save to SQLite
+
+BUILD_PLAN.md Phase 1 exit criteria:
+- [ ] BiasTestSuite.run() produces numbers within 5% of published Adult Income
+      benchmarks — **PENDING (Week 3)**
+- [ ] COMPAS false positive rate gap matches ProPublica within 5%
+      (African-American vs Caucasian) — **PENDING (Week 3)**
+- [x] All 5 metrics have pytest tests with hardcoded expected values
+      (`tests/test_bias.py`)
+- [x] `governance/testing/engine.py` (Engine Orchestrator) built and working
+- [x] `tests/test_adapters.py` — all 5 tests pass
+- [x] `tests/test_bias.py` — all 5 tests pass
+- [x] Results save correctly to SQLite
+- [x] POST /api/v1/test-runs creates a TestRun in SQLite and triggers a run
+- [x] GET /api/v1/test-runs/{id}/results returns the saved results
+
+Progress: **7 / 9 done, 2 pending (both Week 3 benchmark validation).**
+
+Component status:
+- [x] Component 1 — Model adapter layer (Sklearn, Pickle, API)
+- [x] Component 2 — BiasTestSuite with 5 metrics + Engine orchestrator
+- [x] Component 3 — API endpoints (POST /test-runs, GET status, GET results)
+- [ ] Week 3 — Validated against UCI Adult Income (within 5% of published)
+- [ ] Week 3 — Validated against COMPAS dataset (within 5% of ProPublica)
 
 ### Phase 2 — Compliance Mapper
 - [ ] eu_ai_act.json rules file complete (Articles 9,10,13,14,15)
