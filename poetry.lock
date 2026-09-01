@@ -93,6 +93,25 @@ files = [
 ]
 
 [[package]]
+name = "fairlearn"
+version = "0.14.0"
+description = "A Python package to assess and improve fairness of machine learning models."
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "fairlearn-0.14.0-py3-none-any.whl", hash = "sha256:2ffe37b71f5b6a8e140b5db75a7990da64fd04b46e7acfc81654f92497ed2ece"},
+    {file = "fairlearn-0.14.0.tar.gz", hash = "sha256:dc9d12fc6d3f4c94f1bf32eb11032b73363c4a62c986485bcc87febe2e583ebd"},
+]
+
+[package.dependencies]
+narwhals = ">=1.14.0"
+numpy = ">=1.24.4"
+pandas = ">=2.0.3"
+scikit-learn = ">=1.5.0"
+scipy = ">=1.9.3"
+
+[[package]]
 name = "fastapi"
 version = "0.141.1"
 description = "FastAPI framework, high performance, easy to learn, fast to code, ready for production"
@@ -1607,4 +1626,4 @@ dev = ["httpx", "pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.12"
-content-hash = "c6c07fee7a7fc74a8bf5fe921c621a03ec9745bf2b40423a6d0b93c059d7957c"
+content-hash = "d34817ee3a3b3f500de398f0865db302033953472afae3e1513f52d877dd3dbc"
