@@ -194,37 +194,149 @@ One row per regulatory obligation assessed.
 **Goal:** Correct bias tests validated against published research benchmarks.
 
 ### What We Are Building
-A module that accepts any AI model, runs it against test data, and measures 5 fairness metrics.
+A module that accepts any AI model, runs it against test data, measures 5 fairness
+metrics, and persists everything to SQLite. Three components:
 
-### The 5 Metrics
-1. Demographic Parity Difference — gap in positive prediction rate between groups (fail if > 10%)
-2. Equalized Odds Difference — gap in true positive AND false positive rates (fail if > 10%)
-3. Equal Opportunity Difference — gap in true positive rate (fail if > 10%)
-4. Predictive Parity Difference — gap in precision between groups (fail if > 10%)
-5. Individual Fairness Score — similar people get similar predictions (fail if < 0.80)
+1. **Model Adapter Layer** — universal translator (`governance/testing/adapters.py`)
+2. **BiasTestSuite** — the 5 fairness metrics (`governance/testing/bias.py`)
+3. **Engine Orchestrator** — ties it together and writes to the database
+   (`governance/testing/engine.py`)
 
-### Model Adapter Layer
-Universal translator so testing engine works with any model type:
-- SklearnAdapter — in-memory sklearn model
-- PickleAdapter — serialised model file on disk
-- APIAdapter — REST endpoint that returns predictions
+---
+
+### Component 1 — Model Adapter Layer
+`governance/testing/adapters.py`
+
+Universal translator so the testing engine works with any model type. Every
+adapter exposes the same interface:
+- `predict(X)` → 1D array of class predictions
+- `predict_proba(X)` → 2D array of class probabilities, or `None` if the
+  underlying model cannot produce them (must fail cleanly, never raise)
+
+Adapters:
+- **SklearnAdapter** — wraps an in-memory fitted sklearn model
+- **PickleAdapter** — loads a serialised model file from disk, then behaves
+  exactly like SklearnAdapter. Raises a clear, explicit error if the file path
+  is missing or unreadable.
+- **APIAdapter** — calls a REST endpoint that returns predictions
+
+`load_adapter(source)` — factory that inspects the input and returns the right
+adapter type:
+- fitted sklearn estimator in memory → SklearnAdapter
+- path to a `.pkl` file → PickleAdapter
+- URL string → APIAdapter
+
+---
+
+### Component 2 — BiasTestSuite
+`governance/testing/bias.py`
+
+`BiasTestSuite.run()` always returns **exactly 5 results**, one per metric below.
+Each result carries: `metric_name`, `metric_value`, `threshold`, `status`
+(pass / warn / fail), and a `detail` dict containing the per-group rates.
+
+#### Threshold table
+
+| metric | fail | warn | pass |
+|---|---|---|---|
+| `demographic_parity_difference` | > 0.10 | 0.07 – 0.10 | ≤ 0.07 |
+| `equalized_odds_difference` | > 0.10 | 0.07 – 0.10 | ≤ 0.07 |
+| `equal_opportunity_difference` | > 0.10 | 0.07 – 0.10 | ≤ 0.07 |
+| `predictive_parity_difference` | > 0.10 | 0.07 – 0.10 | ≤ 0.07 |
+| `individual_fairness_score` | **< 0.80** | — | **≥ 0.80** |
+
+**⚠️ `individual_fairness_score` has an INVERTED threshold.** For the first four
+metrics a *higher* value is *worse* (it is a gap — fail when it exceeds 0.10).
+For `individual_fairness_score` a *higher* value is *better* (it is a similarity
+score — fail when it drops below 0.80). There is no warn band for this metric:
+it is pass or fail only. Do not apply the `> threshold` logic to it.
+
+Thresholds must be overridable per call (e.g. a stricter 0.05) — the status is
+recomputed against whatever threshold is passed in.
+
+---
+
+### Component 3 — Engine Orchestrator
+`governance/testing/engine.py`
+
+The orchestrator is the single entry point that runs a full test and records it.
+Given a system ID, a model source, test data, and a list of protected
+attributes, it does the following in order:
+
+1. Create a `TestRun` row in SQLite with `status = "running"` and `started_at` set.
+2. Load the model via `load_adapter()`.
+3. For **each** protected attribute, run `BiasTestSuite.run()` against the model
+   and test data for that attribute.
+4. Save every metric result as a `TestResult` row (`run_id`, `module = "bias"`,
+   `metric_name`, `metric_value`, `threshold`, `status`, `detail`).
+5. On success: update the `TestRun` to `status = "complete"` and set
+   `completed_at`. On any exception: update to `status = "failed"`, set
+   `completed_at`, and record the error in `TestRun.config` (or a detail field)
+   — do not leave a run stuck in `"running"`.
+
+This is what `POST /api/v1/test-runs` calls.
+
+---
 
 ### Validation Datasets (MUST use these — they have published benchmarks)
 1. UCI Adult Income — gender/race bias, demographic parity diff ~0.19 for naive model
 2. COMPAS Recidivism (ProPublica) — racial bias, false positive rate gap ~0.20 Black vs White
 3. German Credit (UCI) — age/gender bias, demographic parity diff ~0.12
 
+#### COMPAS filtering (ProPublica methodology — apply exactly)
+Start from `compas-scores-two-years.csv` and keep only rows where:
+1. `days_b_screening_arrest` is between **-30 and 30** (inclusive)
+2. `is_recid` **!= -1**
+3. `c_charge_degree` **!= "O"** (drop ordinary traffic offences)
+4. `score_text` **!= "N/A"**
+
+Then restrict the comparison to **African-American vs Caucasian only**
+(`race` in those two values) — this is the group pair ProPublica reports the
+~0.20 false-positive-rate gap for.
+
 ### Week Structure
-- Week 1 (Days 6-10): Build model adapter layer
-- Week 2 (Days 11-17): Build BiasTestSuite with all 5 metrics using fairlearn
+- Week 1 (Days 6-10): Build model adapter layer (Component 1) + its pytest suite
+- Week 2 (Days 11-17): Build BiasTestSuite (Component 2) with all 5 metrics using
+  fairlearn, then the Engine Orchestrator (Component 3)
 - Week 3 (Days 18-25): Validate numbers against published benchmarks — DO NOT SKIP THIS
+
+### Dependency Install Order (Phase 1)
+- **Week 1 only:** `scikit-learn`, `pandas`, `numpy`, `scipy`
+- **Week 2 add:** `fairlearn`
+- **Do NOT install `shap`, `lime`, or `alibi` in Phase 1** — they belong to
+  Phase 4 (shap, lime) and are not needed here.
+
+### Required pytest Tests
+
+`tests/test_adapters.py` — 5 tests:
+1. `SklearnAdapter.predict()` returns an array of the correct shape (one
+   prediction per input row)
+2. `PickleAdapter` gives results identical to `SklearnAdapter` for the same
+   underlying model
+3. `predict_proba()` returns a 2D array when supported, or `None` cleanly when
+   not — never raises
+4. `load_adapter()` returns the right adapter type for each input kind
+   (in-memory estimator, `.pkl` path, URL)
+5. `PickleAdapter` raises a clear, explicit error for a bad / missing file path
+
+`tests/test_bias.py` — 5 tests:
+1. Perfect fairness scenario → `demographic_parity_difference == 0.0`, status pass
+2. Biased scenario, 80% positive rate for group A vs 40% for group B →
+   difference ≈ 0.40, status fail
+3. `BiasTestSuite.run()` always returns exactly 5 results
+4. Custom threshold of 0.05 → a 0.08 difference is classified fail
+5. The `detail` field contains the per-group rates as a dict
 
 ### Exit Criteria — Do NOT move to Phase 2 until:
 - [ ] BiasTestSuite.run() produces numbers within 5% of published Adult Income benchmarks
-- [ ] COMPAS false positive rate gap matches ProPublica within 5%
+- [ ] COMPAS false positive rate gap matches ProPublica within 5% (African-American vs Caucasian)
 - [ ] All 5 metrics have pytest tests with hardcoded expected values
+- [ ] `governance/testing/engine.py` (Engine Orchestrator) built and working
+- [ ] `tests/test_adapters.py` — all 5 tests pass
+- [ ] `tests/test_bias.py` — all 5 tests pass
 - [ ] Results save correctly to SQLite
-- [ ] POST /api/v1/test-runs triggers a test and saves results
+- [ ] POST /api/v1/test-runs creates a TestRun in SQLite and triggers a run
+- [ ] GET /api/v1/test-runs/{id}/results returns the saved results
 
 ---
 
