@@ -33,6 +33,11 @@ dev = [
     "httpx>=0.27,<1.0",
 ]
 
+[tool.pytest.ini_options]
+markers = [
+    "statistical: exercises the real Phase 2 statistical layer at full iteration count (slow ~30s/run); run a fast subset with `pytest -m 'not statistical'`",
+]
+
 [tool.poetry]
 packages = [
     { include = "governance" },

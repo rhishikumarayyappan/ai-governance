@@ -22,10 +22,36 @@ from governance.db.database import get_session
 from governance.db.models import AISystem, TestResult, TestRun
 from governance.testing.adapters import load_adapter
 from governance.testing.bias import BiasTestSuite
+from governance.testing.statistics import (
+    METRIC_WRAPPERS,
+    apply_multiple_comparisons_correction,
+    assess_reliability,
+    bootstrap_confidence_interval,
+    permutation_p_value,
+)
 
 logger = logging.getLogger(__name__)
 
 _TERMINAL_STATUSES = ("complete", "failed")
+
+# --- Phase 2 statistical layer configuration --------------------------------- #
+# The 4 group-comparison fairness metrics. These get a permutation p-value and
+# multiple-comparison correction as ONE family, per protected attribute.
+# overall_accuracy_floor is deliberately excluded — shuffling group labels
+# cannot change overall accuracy, so a permutation p-value for it is
+# structurally meaningless (there is no group-comparison hypothesis to test).
+_FAIRNESS_GAP_METRICS = (
+    "demographic_parity_difference",
+    "equalized_odds_difference",
+    "equal_opportunity_difference",
+    "predictive_parity_difference",
+)
+_INDETERMINATE = "indeterminate"
+_BOOTSTRAP_ITERATIONS = 1_000
+_PERMUTATION_ITERATIONS = 1_000
+_CORRECTION_METHOD = "bonferroni"      # conservative, controls family-wise error
+_RELIABILITY_MIN_GROUP = 30
+_DEFAULT_RANDOM_STATE = 42             # pinned so a re-run reproduces the numbers
 
 
 def _now() -> datetime:
@@ -54,6 +80,91 @@ def _mark_run_failed(run_id: str, message: str) -> None:
         logger.exception("Could not mark TestRun %s as failed", run_id)
 
 
+def _compute_attribute_statistics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    sensitive: pd.Series,
+    bias_results: list,
+    *,
+    random_state: int,
+) -> dict[str, dict]:
+    """Phase 2 statistical enrichment for ONE protected attribute.
+
+    For every one of the 5 metrics: a bootstrap 95% CI and a reliability tier.
+    For the 4 group-comparison fairness metrics only: a permutation p-value and
+    a multiple-comparison-corrected significance threshold, corrected across
+    those 4 together (one hypothesis family per attribute — never mixed with a
+    different attribute's metrics).
+
+    Returns ``{metric_name: {...}}`` with keys matching the new TestResult
+    columns plus ``status`` (which is ``"indeterminate"`` when reliability
+    scoring says the data cannot support a verdict, otherwise the raw
+    pass/warn/fail from BiasTestSuite).
+    """
+    sf = pd.Series(sensitive).reset_index(drop=True)
+    sample_sizes = {str(k): int(v) for k, v in sf.value_counts().items()}
+    n_total = int(len(sf))
+
+    out: dict[str, dict] = {}
+    gap_p_values: dict[str, float] = {}
+
+    for r in bias_results:
+        name = r.metric_name
+        wrapper = METRIC_WRAPPERS[name]
+
+        boot = bootstrap_confidence_interval(
+            wrapper, y_true, y_pred, sf,
+            n_iterations=_BOOTSTRAP_ITERATIONS, random_state=random_state,
+        )
+        reliability = assess_reliability(
+            boot, sample_sizes, min_group_size=_RELIABILITY_MIN_GROUP
+        )
+        out[name] = {
+            "confidence_interval_lower": boot.ci_lower,
+            "confidence_interval_upper": boot.ci_upper,
+            "reliability_tier": reliability.tier,
+            "sample_size": n_total,
+            # populated below for the 4 fairness-gap metrics; left NULL for
+            # overall_accuracy_floor — not a group-comparison metric, so a
+            # permutation p-value is structurally meaningless (shuffling group
+            # labels cannot change overall accuracy).
+            "p_value": None,
+            "corrected_threshold": None,
+            "correction_method": None,
+            "_raw_status": r.status,
+            "_blocks_verdict": reliability.blocks_verdict,
+        }
+
+        if name in _FAIRNESS_GAP_METRICS:
+            _observed, p = permutation_p_value(
+                wrapper, y_true, y_pred, sf,
+                n_permutations=_PERMUTATION_ITERATIONS, random_state=random_state,
+            )
+            gap_p_values[name] = p
+
+    # ---- correct the fairness-gap p-values as one family ------------------ #
+    if gap_p_values:
+        ordered = [m for m in _FAIRNESS_GAP_METRICS if m in gap_p_values]
+        correction = apply_multiple_comparisons_correction(
+            [gap_p_values[m] for m in ordered], method=_CORRECTION_METHOD
+        )
+        ca = correction.corrected_alpha  # Bonferroni -> scalar; BH -> per-rank list
+        for i, m in enumerate(ordered):
+            out[m]["p_value"] = gap_p_values[m]
+            out[m]["correction_method"] = correction.method
+            out[m]["corrected_threshold"] = (
+                float(ca) if isinstance(ca, (int, float)) else float(ca[i])
+            )
+
+    # ---- resolve the persisted status ---------------------------------- #
+    for d in out.values():
+        blocks = d.pop("_blocks_verdict")
+        raw = d.pop("_raw_status")
+        d["status"] = _INDETERMINATE if blocks else raw
+
+    return out
+
+
 def run_bias_tests(
     system_id: str,
     model_source: Any,
@@ -61,16 +172,31 @@ def run_bias_tests(
     y_test: np.ndarray,
     protected_attributes: list[str],
     config: dict | None = None,
+    *,
+    random_state: int = _DEFAULT_RANDOM_STATE,
 ) -> str:
     """Run the full bias test suite for one AI system and persist everything.
 
     The ONLY function permitted to create TestRun and TestResult rows. Opens a
     TestRun immediately (status "running") so the run is trackable from the first
     moment, then loads the model, runs BiasTestSuite once per protected
-    attribute, saves every metric result, and closes the TestRun as "complete".
-    On any failure the TestRun is set to "failed" (error recorded in
-    config["error"], completed_at set) before the exception is re-raised — a run
-    is never left permanently in "running".
+    attribute, computes the Phase 2 statistical layer for that attribute
+    (bootstrap 95% CI + reliability tier for all 5 metrics; permutation p-value
+    + multiple-comparison correction for the 4 fairness-gap metrics as one
+    family), saves every metric result with those columns populated, and closes
+    the TestRun as "complete". On any failure the TestRun is set to "failed"
+    (error recorded in config["error"], completed_at set) before the exception
+    is re-raised — a run is never left permanently in "running".
+
+    When reliability scoring returns tier="insufficient_data" for a metric, that
+    row's persisted ``status`` is ``"indeterminate"`` — the data cannot support
+    a pass/warn/fail verdict. Downstream code must check ``status == "pass"``
+    explicitly, never ``status != "fail"``.
+
+    The statistical layer is on for every run. It adds real runtime — roughly
+    9 x 1,000-iteration resampling loops per protected attribute, seconds on
+    small data and minutes on large. ``random_state`` is pinned by default so a
+    re-run of the same test reproduces the same CIs and p-values.
 
     Parameters
     ----------
@@ -152,6 +278,12 @@ def run_bias_tests(
 
             results = BiasTestSuite().run(y_test, y_pred, sensitive, attribute_name)
 
+            # Phase 2: bootstrap CI + reliability for all 5, permutation p-value
+            # + multiple-comparison correction for the 4 fairness-gap metrics.
+            stats = _compute_attribute_statistics(
+                y_test, y_pred, sensitive, results, random_state=random_state
+            )
+
             with get_session() as session:
                 session.add_all(
                     [
@@ -162,8 +294,25 @@ def run_bias_tests(
                             metric_name=r.metric_name,
                             metric_value=r.value,
                             threshold=r.threshold,
-                            status=r.status,
+                            status=stats[r.metric_name]["status"],
                             detail=r.detail,
+                            confidence_interval_lower=stats[r.metric_name][
+                                "confidence_interval_lower"
+                            ],
+                            confidence_interval_upper=stats[r.metric_name][
+                                "confidence_interval_upper"
+                            ],
+                            p_value=stats[r.metric_name]["p_value"],
+                            corrected_threshold=stats[r.metric_name][
+                                "corrected_threshold"
+                            ],
+                            correction_method=stats[r.metric_name][
+                                "correction_method"
+                            ],
+                            reliability_tier=stats[r.metric_name][
+                                "reliability_tier"
+                            ],
+                            sample_size=stats[r.metric_name]["sample_size"],
                         )
                         for r in results
                     ]
@@ -188,9 +337,12 @@ def run_bias_tests(
 def get_run_results(run_id: str) -> list[dict]:
     """Return all TestResult rows for run_id as plain dicts.
 
-    One dict per result with keys: id, run_id, module, metric_name,
-    metric_value, threshold, status, detail. Returns [] for an unknown run_id —
-    never raises (the API layer decides whether that is a 404).
+    One dict per result. Keys: id, run_id, module, metric_name, metric_value,
+    threshold, status, detail, plus the Phase 2 statistical columns —
+    confidence_interval_lower, confidence_interval_upper, p_value,
+    corrected_threshold, correction_method, reliability_tier, sample_size (the
+    last three of those are NULL for overall_accuracy_floor). Returns [] for an
+    unknown run_id — never raises (the API layer decides whether that is a 404).
     """
     with get_session() as session:
         rows = session.scalars(
@@ -206,6 +358,13 @@ def get_run_results(run_id: str) -> list[dict]:
                 "threshold": row.threshold,
                 "status": row.status,
                 "detail": row.detail,
+                "confidence_interval_lower": row.confidence_interval_lower,
+                "confidence_interval_upper": row.confidence_interval_upper,
+                "p_value": row.p_value,
+                "corrected_threshold": row.corrected_threshold,
+                "correction_method": row.correction_method,
+                "reliability_tier": row.reliability_tier,
+                "sample_size": row.sample_size,
             }
             for row in rows
         ]

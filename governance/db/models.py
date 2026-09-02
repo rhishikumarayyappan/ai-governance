@@ -40,6 +40,24 @@ class RiskTier(str, enum.Enum):
     minimal = "minimal"
 
 
+# The values TestResult.status can take. "indeterminate" is set by the engine
+# when reliability scoring returns "insufficient_data" — the data cannot support
+# a verdict. It is the ABSENCE of a result, not a soft "warn".
+TEST_RESULT_STATUSES = ("pass", "warn", "fail", "indeterminate")
+
+
+def is_pass(status: str | None) -> bool:
+    """True ONLY for an explicit ``"pass"``.
+
+    Everything else — ``"warn"``, ``"fail"``, ``"indeterminate"``, ``None`` — is
+    not a pass. Downstream code (the Phase 5 compliance mapper, reports, the
+    dashboard) MUST use this, never ``status != "fail"``: a lazy negation would
+    silently count an ``"indeterminate"`` result — where the data was too thin to
+    test — as compliant.
+    """
+    return status == "pass"
+
+
 class AISystem(Base):
     __tablename__ = "ai_systems"
 

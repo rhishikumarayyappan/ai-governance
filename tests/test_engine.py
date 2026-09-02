@@ -14,7 +14,31 @@ from sqlalchemy import func, select
 from governance.db import models  # noqa: imported as module so pytest doesn't
 from governance.db.database import get_session  # try to collect TestRun/TestResult
 from governance.db.models import AISystem, RiskTier
+from governance.testing import engine as _engine
 from governance.testing.engine import get_run_results, run_bias_tests
+
+
+@pytest.fixture(autouse=True)
+def _fast_statistics(monkeypatch):
+    """Drop the engine's bootstrap / permutation iteration counts from 1,000 to
+    100 for the duration of each test in THIS module.
+
+    Exists purely for suite speed on structural / plumbing tests — the ones that
+    verify "5 results, valid status, all columns populated", not a specific
+    statistical value. **Never rely on this in a test that asserts a particular
+    CI bound, p-value, or corrected threshold** — those live in
+    ``tests/test_engine_statistics.py``, which does not import this fixture and
+    runs the real 1,000-iteration path. The production ``run_bias_tests`` code
+    path is completely unaffected; only these two module-level constants are
+    patched, and only inside this test module.
+
+    100 is verified to give the *same* ``reliability_tier`` as 1,000 for the
+    fixtures here (all "unstable" — 140 rows of noise genuinely can't support a
+    tight estimate), and single-group resample skips stay at 0 with a 70/70
+    split, so the 5% skip threshold is never in play.
+    """
+    monkeypatch.setattr(_engine, "_BOOTSTRAP_ITERATIONS", 100)
+    monkeypatch.setattr(_engine, "_PERMUTATION_ITERATIONS", 100)
 
 
 def _make_system(name: str = "test-system") -> str:
@@ -33,15 +57,21 @@ def _make_system(name: str = "test-system") -> str:
 
 @pytest.fixture
 def toy_data():
-    """20 rows, 3 numeric features, 1 protected attribute column."""
+    """140 rows (70 per group), 3 numeric features, 1 protected attribute.
+
+    Sized so both groups clear the 30-sample reliability floor — a 20-row run
+    genuinely cannot support a verdict, so since Phase 2 the engine would flag
+    every metric "indeterminate" on the old fixture. This is a realistic-enough
+    toy, not a workaround.
+    """
     rng = np.random.RandomState(0)
-    n = 20
+    n = 140
     X = pd.DataFrame(
         {
             "f1": rng.randn(n),
             "f2": rng.randn(n),
             "f3": rng.randn(n),
-            "grp": rng.choice(["A", "B"], size=n),
+            "grp": np.array(["A", "B"] * (n // 2)),
         }
     )
     y = rng.randint(0, 2, size=n)

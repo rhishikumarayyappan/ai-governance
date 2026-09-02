@@ -298,13 +298,29 @@ Bootstrap resampling with 1,000 iterations for every metric.
 - Recompute the metric on each resample
 - Report the 2.5th and 97.5th percentiles as the 95% CI
 
-Every `TestResult` gains `confidence_interval_lower` and `confidence_interval_upper`.
+Every `TestResult` gains `confidence_interval_lower` and `confidence_interval_upper`
+— **all 5 metrics**, including `overall_accuracy_floor` (a CI reflects
+estimate stability under resampling, which is meaningful for a plain accuracy
+number too). Reliability tier and `sample_size` are likewise on all 5.
 
 ### Multiple Comparisons Correction
-Five simultaneous tests inflate false-positive probability. Implement:
+
+> **Scope clarified 2026-09-02 during the TestResult wiring sub-step.** The
+> correction and the `p_value` that feeds it apply to the **4 group-comparison
+> fairness metrics only** (demographic parity, equalized odds, equal
+> opportunity, predictive parity), corrected together as one family **per
+> protected attribute**. `overall_accuracy_floor` is excluded: shuffling group
+> labels cannot change overall accuracy, so a permutation p-value for it is
+> structurally meaningless — there is no group-comparison hypothesis to test
+> significance against. Its `p_value`, `corrected_threshold` and
+> `correction_method` columns are `NULL` — not missing data, structurally
+> not applicable.
+
+Four simultaneous tests inflate false-positive probability. Implement:
 - **Bonferroni correction** — divide alpha by number of tests (conservative, default)
 - **Benjamini-Hochberg FDR** — less conservative, offered as an option
-- Store both `threshold` (raw) and `corrected_threshold` on every result
+- Store both `threshold` (raw fairness bar) and `corrected_threshold` (the
+  corrected *significance* level the p-value must beat) on every fairness-gap result
 - The compliance mapper uses the **corrected** threshold, always
 
 Implemented as `apply_multiple_comparisons_correction(p_values, method, alpha)`
@@ -415,18 +431,35 @@ Implement the impossibility theorem awareness. When base rates differ between gr
 Every compliance report includes a "Fairness Definition Applied" section stating which definition was prioritised and why, because you cannot satisfy them all.
 
 ## Exit Criteria — Phase 2
-- [ ] `statistics.py` with chi-squared, Fisher's exact, z-test, permutation test
-- [ ] Bootstrap CI (1,000 iterations) on all 5 metrics
-- [ ] Bonferroni and Benjamini-Hochberg corrections implemented
-- [ ] Reliability assessment with three-tier flag
-- [ ] "insufficient_data" blocks compliance verdict — verified by test
-- [ ] `THRESHOLDS.md` written with honest regulatory-basis statement
-- [ ] Thresholds configurable per system, changes audit-logged
-- [ ] Simpson's paradox stratification detects a planted subgroup reversal (test)
-- [ ] Metric tension detection fires on differing base rates (test)
-- [ ] All `TestResult` rows now carry CI, p-value, corrected threshold, sample size
+- [x] `statistics.py` with chi-squared, Fisher's exact, z-test, permutation test
+- [x] Bootstrap CI (1,000 iterations) on all 5 metrics
+- [x] Bonferroni and Benjamini-Hochberg corrections implemented
+- [x] Reliability assessment with three-tier flag
+- [x] "insufficient_data" blocks compliance verdict — verified by test
+      (engine persists `status="indeterminate"`)
+- [x] `THRESHOLDS.md` written with honest regulatory-basis statement
+- [ ] Thresholds configurable per system, changes audit-logged  ← **Part B, next session — the only Phase 2 item left**
+- [x] Simpson's paradox stratification detects a planted subgroup reversal (test)
+- [x] Metric tension detection fires on differing base rates (test)
+- [x] `TestResult` rows carry CI + reliability tier + sample_size (all 5 metrics)
+      and p-value + corrected threshold + correction method (4 fairness-gap
+      metrics; NULL for `overall_accuracy_floor` — see the note above)
 - [ ] Re-run Phase 1 validation — numbers unchanged, now with CIs attached
 - [ ] pytest → all passing
+
+### The TestResult wiring sub-step — COMPLETE (2026-09-02)
+
+`run_bias_tests` now, per protected attribute, after `BiasTestSuite.run()`:
+computes a bootstrap 95% CI and a reliability tier for all 5 metrics; a
+permutation p-value + Bonferroni-corrected significance threshold for the 4
+fairness-gap metrics as one family; and persists all of it onto the new
+`TestResult` columns. When reliability scoring returns `insufficient_data` the
+persisted `status` is `"indeterminate"` (engine-set — `BiasTestSuite` still only
+ever produces pass/warn/fail). `scripts/migrate_add_testresult_stats.py` adds the
+columns to a pre-existing SQLite file (no Alembic until Phase 7). Runtime: the
+statistical layer is ~9 × 1,000-iteration resampling loops per attribute —
+seconds on small data, minutes at scale; `random_state` is pinned so a re-run
+reproduces the numbers.
 
 ---
 

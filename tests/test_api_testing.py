@@ -17,6 +17,22 @@ from sklearn.linear_model import LogisticRegression
 
 from governance.db.database import get_session
 from governance.db.models import AISystem, RiskTier
+from governance.testing import engine as _engine
+
+
+@pytest.fixture(autouse=True)
+def _fast_statistics(monkeypatch):
+    """Drop the engine's bootstrap / permutation iteration counts to 100 for
+    every test in THIS module — a suite-speed measure for structural / API
+    plumbing tests only.
+
+    Never use in a test asserting a specific statistical value (those are in
+    ``tests/test_engine_statistics.py`` and run the real 1,000-iteration path).
+    Production code is unaffected — only two module-level constants are patched,
+    only inside this module.
+    """
+    monkeypatch.setattr(_engine, "_BOOTSTRAP_ITERATIONS", 100)
+    monkeypatch.setattr(_engine, "_PERMUTATION_ITERATIONS", 100)
 
 
 @pytest.fixture
@@ -45,14 +61,16 @@ def system_id(test_db) -> str:
 def payload():
     """A matching (csv_bytes, model_bytes) pair.
 
-    CSV: feature_1 (float), gender (M/F), target (0/1), 24 rows, balanced target.
+    CSV: feature_1 (float), gender (M/F, 70 each), target (0/1), 140 rows.
+    Sized so both groups clear the 30-sample reliability floor — since Phase 2
+    a smaller run would have every metric flagged "indeterminate".
     Model: LogisticRegression trained on feature_1 only (the engine drops
     'gender' before predicting, leaving one feature column).
     """
     rng = np.random.RandomState(7)
-    n = 24
+    n = 140
     feature_1 = rng.randn(n)
-    gender = rng.choice(["M", "F"], size=n)
+    gender = np.array(["M", "F"] * (n // 2))
     target = (feature_1 > np.median(feature_1)).astype(int)
     df = pd.DataFrame({"feature_1": feature_1, "gender": gender, "target": target})
 
