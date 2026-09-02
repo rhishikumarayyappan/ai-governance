@@ -19,6 +19,9 @@ from scipy.stats import chi2_contingency, norm
 from governance.testing.statistics import (
     ALPHA,
     METRIC_WRAPPERS,
+    BootstrapResult,
+    apply_multiple_comparisons_correction,
+    assess_reliability,
     bootstrap_confidence_interval,
     demographic_parity_wrapper,
     equal_opportunity_wrapper,
@@ -335,3 +338,178 @@ def test_single_group_resample_is_handled():
     # the flag fired because the skipped fraction is well over 5%
     assert result.reliability_warning is not None
     assert "skipped" in result.reliability_warning
+
+
+# =========================================================================== #
+# Multiple-comparisons correction — Phase 2, gap 1.1
+# =========================================================================== #
+def _mk_bootstrap(
+    ci_lower, ci_upper, std, n_valid=1000, n_skipped_single_group=0
+) -> BootstrapResult:
+    """Minimal BootstrapResult for reliability tests — only the fields
+    assess_reliability reads need to be meaningful."""
+    return BootstrapResult(
+        point_estimate=(ci_lower + ci_upper) / 2,
+        ci_lower=ci_lower,
+        ci_upper=ci_upper,
+        confidence_level=0.95,
+        n_iterations=1000,
+        bootstrap_distribution_summary={"min": ci_lower, "max": ci_upper, "std": std},
+        n_valid_iterations=n_valid,
+        n_skipped_single_group=n_skipped_single_group,
+        reliability_warning=None,
+        skip_breakdown={},
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Test 1 — Bonferroni on a known example
+# --------------------------------------------------------------------------- #
+def test_bonferroni_known_example():
+    # 5 tests at alpha 0.05 → corrected alpha exactly 0.01.
+    # p-values straddle 0.01: two below, three above.
+    p_values = [0.001, 0.008, 0.02, 0.04, 0.30]
+    result = apply_multiple_comparisons_correction(
+        p_values, method="bonferroni", alpha=0.05
+    )
+    assert result.corrected_alpha == 0.01
+    assert result.n_comparisons == 5
+    assert result.significant == [True, True, False, False, False]
+    # Bonferroni's decision is exactly p < corrected_alpha, element-wise.
+    assert result.significant == [p < 0.01 for p in p_values]
+
+
+# --------------------------------------------------------------------------- #
+# Test 2 — Benjamini-Hochberg against the original 1995 paper
+# --------------------------------------------------------------------------- #
+def test_benjamini_hochberg_matches_1995_paper():
+    # Benjamini & Hochberg (1995), "Controlling the False Discovery Rate",
+    # JRSS-B 57(1):289-300, Table 1 — the Neuhaus et al. cardiac-trial
+    # p-values. At alpha=0.05 the paper's BH procedure rejects the 4 smallest
+    # hypotheses (vs 3 for Bonferroni).
+    p_values = [
+        0.0001, 0.0004, 0.0019, 0.0095, 0.0201, 0.0278, 0.0298, 0.0344,
+        0.0459, 0.3240, 0.4262, 0.5719, 0.6528, 0.7590, 1.000,
+    ]
+    result = apply_multiple_comparisons_correction(
+        p_values, method="benjamini_hochberg", alpha=0.05
+    )
+    assert sum(result.significant) == 4
+    assert result.significant[:4] == [True, True, True, True]
+    assert result.significant[4:] == [False] * 11
+    # corrected_alpha is a per-rank list, original order, aligned to p_values.
+    assert isinstance(result.corrected_alpha, list)
+    assert len(result.corrected_alpha) == 15
+    assert result.corrected_alpha[0] == pytest.approx(1 / 15 * 0.05)
+    assert result.corrected_alpha[-1] == pytest.approx(15 / 15 * 0.05)
+
+
+# --------------------------------------------------------------------------- #
+# Test 3 — BH is at least as permissive as Bonferroni on the same data
+# --------------------------------------------------------------------------- #
+def test_bh_is_less_conservative_than_bonferroni():
+    p_values = [0.001, 0.012, 0.025, 0.04, 0.2]
+    bonf = apply_multiple_comparisons_correction(p_values, method="bonferroni")
+    bh = apply_multiple_comparisons_correction(
+        p_values, method="benjamini_hochberg"
+    )
+    # BH never flags fewer than Bonferroni, and here flags strictly more.
+    assert sum(bh.significant) >= sum(bonf.significant)
+    assert sum(bh.significant) > sum(bonf.significant)
+    # every Bonferroni rejection is also a BH rejection
+    for b, h in zip(bonf.significant, bh.significant):
+        assert not b or h
+
+
+# --------------------------------------------------------------------------- #
+# Test 4 — BH step-up: a hypothesis can be significant with p above its own crit
+# --------------------------------------------------------------------------- #
+def test_bh_step_up_can_reject_above_own_critical_value():
+    # n=4, alpha=0.05. Sorted p = [0.001, 0.04, 0.045, 0.05].
+    # Largest rank k with p_(k) <= (k/4)*0.05: rank 4, 0.05 <= 0.05 → k=4.
+    # So ALL four are significant — including rank 2 (p=0.04 > crit 0.025) and
+    # rank 3 (p=0.045 > crit 0.0375). This is correct BH, not a bug.
+    p_values = [0.001, 0.04, 0.045, 0.05]
+    result = apply_multiple_comparisons_correction(
+        p_values, method="benjamini_hochberg", alpha=0.05
+    )
+    assert result.significant == [True, True, True, True]
+    assert p_values[1] > result.corrected_alpha[1]   # 0.04 > 0.025
+    assert result.significant[1] is True             # yet still rejected
+
+
+# --------------------------------------------------------------------------- #
+# Test 5 — invalid p-values raise, never get silently coerced
+# --------------------------------------------------------------------------- #
+def test_invalid_p_values_raise():
+    with pytest.raises(ValueError, match="non-finite"):
+        apply_multiple_comparisons_correction([0.01, float("nan"), 0.2])
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        apply_multiple_comparisons_correction([0.01, 1.5])
+    with pytest.raises(ValueError, match="non-empty"):
+        apply_multiple_comparisons_correction([])
+
+
+# =========================================================================== #
+# Reliability scoring — Phase 2, gap 1.8
+# =========================================================================== #
+# --------------------------------------------------------------------------- #
+# Test 6 — a small group blocks the verdict
+# --------------------------------------------------------------------------- #
+def test_small_group_size_blocks_verdict():
+    boot = _mk_bootstrap(ci_lower=0.08, ci_upper=0.12, std=0.01)
+    assessment = assess_reliability(boot, sample_sizes={"A": 500, "B": 15})
+    assert assessment.tier == "insufficient_data"
+    assert assessment.blocks_verdict is True
+    assert any("only 15 samples" in r for r in assessment.reasons)
+
+
+# --------------------------------------------------------------------------- #
+# Test 7 — a high single-group skip rate blocks the verdict
+# --------------------------------------------------------------------------- #
+def test_high_skip_rate_blocks_verdict():
+    # groups are adequately sized, but 12% of resamples collapsed to one group
+    boot = _mk_bootstrap(
+        ci_lower=0.05, ci_upper=0.15, std=0.02,
+        n_valid=880, n_skipped_single_group=120,
+    )
+    assessment = assess_reliability(boot, sample_sizes={"A": 200, "B": 40})
+    assert assessment.tier == "insufficient_data"
+    assert assessment.blocks_verdict is True
+    assert any("collapsed to a single group" in r for r in assessment.reasons)
+
+
+# --------------------------------------------------------------------------- #
+# Test 8 — a wide CI is unstable but not blocked
+# --------------------------------------------------------------------------- #
+def test_wide_ci_is_unstable_not_blocked():
+    boot = _mk_bootstrap(ci_lower=0.02, ci_upper=0.30, std=0.03)  # width 0.28
+    assessment = assess_reliability(boot, sample_sizes={"A": 300, "B": 280})
+    assert assessment.tier == "unstable"
+    assert assessment.blocks_verdict is False
+    assert any("confidence interval spans" in r for r in assessment.reasons)
+
+
+# --------------------------------------------------------------------------- #
+# Test 9 — clean data is reliable, with a positive confirmation
+# --------------------------------------------------------------------------- #
+def test_clean_data_is_reliable():
+    boot = _mk_bootstrap(ci_lower=0.09, ci_upper=0.11, std=0.008)
+    assessment = assess_reliability(boot, sample_sizes={"A": 1000, "B": 950})
+    assert assessment.tier == "reliable"
+    assert assessment.blocks_verdict is False
+    assert len(assessment.reasons) == 1
+    assert "passed" in assessment.reasons[0]
+
+
+# --------------------------------------------------------------------------- #
+# Test 10 — multiple failing rules all appear in reasons
+# --------------------------------------------------------------------------- #
+def test_multiple_reasons_accumulate():
+    # fails Rule 1 (group of 12) AND Rule 3 (CI width 0.4)
+    boot = _mk_bootstrap(ci_lower=0.0, ci_upper=0.4, std=0.02)
+    assessment = assess_reliability(boot, sample_sizes={"A": 400, "B": 12})
+    assert assessment.tier == "insufficient_data"   # the more severe of the two
+    assert any("only 12 samples" in r for r in assessment.reasons)
+    assert any("confidence interval spans" in r for r in assessment.reasons)
+    assert len(assessment.reasons) >= 2

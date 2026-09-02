@@ -18,14 +18,29 @@ never imports from here). Every fairlearn / sklearn metric used here is imported
 directly from its library so the numbers match exactly what ``BiasTestSuite``
 reports.
 
+3. **Multiple-comparison correction** (``apply_multiple_comparisons_correction``)
+   — five simultaneous fairness tests inflate the family-wise false-positive
+   rate from 5% to ≈23%. Bonferroni (conservative, default) and
+   Benjamini-Hochberg FDR (step-up), both hand-implemented and auditable.
+
+4. **Reliability scoring** (``assess_reliability``) — three tiers
+   (reliable / unstable / insufficient_data). ``insufficient_data`` blocks a
+   compliance verdict entirely; ``unstable`` degrades confidence but still
+   reports.
+
+This module is a **sibling** of ``bias.py`` — it is called alongside
+``BiasTestSuite``, never wraps it, and never imports from it (and ``bias.py``
+never imports from here). Every fairlearn / sklearn metric used here is imported
+directly from its library so the numbers match exactly what ``BiasTestSuite``
+reports.
+
 Explicitly NOT in scope here (later pieces of Phase 2 / Phase 4):
-  * Bonferroni / Benjamini-Hochberg correction, reliability scoring — next in
-    Phase 2
+  * wiring these results onto ``TestResult`` rows — a separate Phase 2 step
   * continuous or multi-class model outputs — Phase 4 (``regression.py`` etc.)
   * general R×C chi-squared — would be its own component with its own tests
 
 See docs/BUILD_PLAN.md → "PHASE 2" and docs/GAP_CHECKLIST.md → Category 1
-(gap 1.4 significance testing, gap 1.3 confidence intervals).
+(1.4 significance, 1.3 confidence intervals, 1.1 correction, 1.8 reliability).
 """
 
 from __future__ import annotations
@@ -56,6 +71,11 @@ __all__ = [
     "predictive_parity_wrapper",
     "individual_fairness_wrapper",
     "METRIC_WRAPPERS",
+    "CorrectionResult",
+    "apply_multiple_comparisons_correction",
+    "ReliabilityAssessment",
+    "assess_reliability",
+    "CORRECTION_METHODS",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -800,3 +820,271 @@ METRIC_WRAPPERS: dict[str, MetricFn] = {
     "predictive_parity_difference": predictive_parity_wrapper,
     "individual_fairness_score": individual_fairness_wrapper,
 }
+
+
+# =========================================================================== #
+# Multiple-comparisons correction (Phase 2 — gap 1.1)
+# =========================================================================== #
+
+CORRECTION_METHODS = ("bonferroni", "benjamini_hochberg")
+
+
+@dataclass
+class CorrectionResult:
+    """Outcome of correcting a family of p-values for multiple testing.
+
+    Attributes
+    ----------
+    method : str
+        ``"bonferroni"`` or ``"benjamini_hochberg"``.
+    original_alpha : float
+        The uncorrected significance level (e.g. 0.05).
+    corrected_alpha : float | list[float]
+        **Bonferroni** — a single scalar, ``alpha / n``: the bar is lowered once,
+        uniformly, and every p-value is compared against it.
+        **Benjamini-Hochberg** — a list, one value per p-value in the *original*
+        order: each comparison's critical value is ``(rank / n) * alpha`` where
+        ``rank`` is that p-value's 1-indexed ascending rank. There is no single
+        number because the BH threshold depends on rank.
+    p_values : list[float]
+        Echoed back, original order, for traceability.
+    significant : list[bool]
+        Per p-value, original order, after correction.
+        **Bonferroni** — exactly ``p < corrected_alpha``.
+        **Benjamini-Hochberg** — the *step-up* decision: find the largest rank
+        ``k`` with ``p_(k) <= (k/n) * alpha``, then every hypothesis of rank
+        ``<= k`` is significant. Consequence: ``significant[i]`` can be ``True``
+        even when ``p_values[i] > corrected_alpha[i]`` — this is correct BH
+        behaviour, not a bug, and is the most common way BH is implemented wrong.
+    n_comparisons : int
+        ``len(p_values)`` — the family size the correction was computed against.
+    """
+
+    method: str
+    original_alpha: float
+    corrected_alpha: float | list[float]
+    p_values: list[float]
+    significant: list[bool]
+    n_comparisons: int
+
+
+def _validate_p_values(p_values, alpha) -> np.ndarray:
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must be in (0, 1), got {alpha}")
+    arr = np.asarray(list(p_values), dtype=float)
+    if arr.size == 0:
+        raise ValueError("p_values must be a non-empty sequence")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(
+            "p_values contains a non-finite value (nan/inf). A metric that could "
+            "not produce a valid p-value is indeterminate and must be handled "
+            "before correction, not passed through."
+        )
+    if np.any(arr < 0.0) or np.any(arr > 1.0):
+        raise ValueError(
+            f"every p-value must be in [0, 1]; got {arr.tolist()}"
+        )
+    return arr
+
+
+def apply_multiple_comparisons_correction(
+    p_values: list[float],
+    method: str = "bonferroni",
+    alpha: float = 0.05,
+) -> CorrectionResult:
+    """Correct a family of p-values so the *family-wise* (Bonferroni) or *false
+    discovery* (Benjamini-Hochberg) error rate is controlled at ``alpha``.
+
+    Both procedures are implemented directly (no library shortcut) so every step
+    is auditable. BH is validated in the test suite against Benjamini & Hochberg
+    (1995), *JRSS-B* 57(1):289-300, Table 1.
+    """
+    if method not in CORRECTION_METHODS:
+        raise ValueError(
+            f"method must be one of {CORRECTION_METHODS}, got {method!r}"
+        )
+    arr = _validate_p_values(p_values, alpha)
+    n = arr.size
+    p_list = arr.tolist()
+
+    if method == "bonferroni":
+        corrected_alpha: float = alpha / n
+        significant = [p < corrected_alpha for p in p_list]
+        return CorrectionResult(
+            method=method,
+            original_alpha=alpha,
+            corrected_alpha=corrected_alpha,
+            p_values=p_list,
+            significant=significant,
+            n_comparisons=n,
+        )
+
+    # ---- Benjamini-Hochberg -------------------------------------------- #
+    order = np.argsort(arr, kind="stable")           # indices, ascending p
+    ranks = np.empty(n, dtype=int)
+    ranks[order] = np.arange(1, n + 1)               # 1-indexed rank per original i
+    per_rank_critical = [(int(ranks[i]) / n) * alpha for i in range(n)]
+
+    p_sorted = arr[order]
+    k = 0
+    for i in range(n, 0, -1):                        # largest rank first
+        if p_sorted[i - 1] <= (i / n) * alpha:
+            k = i
+            break
+    significant = [int(ranks[i]) <= k for i in range(n)]
+
+    return CorrectionResult(
+        method=method,
+        original_alpha=alpha,
+        corrected_alpha=per_rank_critical,
+        p_values=p_list,
+        significant=significant,
+        n_comparisons=n,
+    )
+
+
+# =========================================================================== #
+# Reliability scoring (Phase 2 — gap 1.8)
+# =========================================================================== #
+#
+# NOTE — this rule set was revised from the original BUILD_PLAN v2.0 draft
+# during Component 2.3 implementation (2026-09-02) and BUILD_PLAN.md was updated
+# to match. The draft folded "bootstrap SD > 0.05" into "insufficient_data" and
+# used "n < 100 per group" plus an N-run reseed. Corrections:
+#   * SD > 0.05 -> "unstable", not "insufficient_data". A large SD is measured
+#     uncertainty on an estimate that WAS computed — categorically different from
+#     data that cannot support any estimate.
+#   * SD read from the single 1,000-iteration bootstrap distribution already
+#     computed in Component 2.2 — an N-run reseed would multiply the ~4s/metric
+#     cost by N for a largely redundant signal.
+#   * min group size hard floor is 30, not 100. The 30-99 range that is still
+#     too imprecise is caught by the CI-width and SD rules anyway.
+
+RELIABILITY_TIERS = ("reliable", "unstable", "insufficient_data")
+
+CI_WIDTH_UNSTABLE_THRESHOLD = 0.15
+BOOTSTRAP_SD_UNSTABLE_THRESHOLD = 0.05
+SINGLE_GROUP_SKIP_BLOCK_THRESHOLD = 0.05   # skipped fraction that blocks a verdict
+
+
+@dataclass
+class ReliabilityAssessment:
+    """Whether a fairness result can support a compliance verdict.
+
+    Attributes
+    ----------
+    tier : str
+        Exactly one of ``RELIABILITY_TIERS``. Resolved by severity:
+        ``insufficient_data`` outranks ``unstable`` outranks ``reliable``.
+    reasons : list[str]
+        Plain-language explanation of **every** rule that fired (not just the
+        one that set the tier), so a compliance report shows the full picture.
+        For a ``reliable`` result, a single positive confirmation line.
+    blocks_verdict : bool
+        ``True`` if and only if ``tier == "insufficient_data"``. When ``True``
+        the compliance mapper must produce "indeterminate — insufficient sample"
+        rather than pass or fail.
+    """
+
+    tier: str
+    reasons: list[str]
+    blocks_verdict: bool
+
+
+def assess_reliability(
+    bootstrap_result: BootstrapResult,
+    sample_sizes: dict,
+    min_group_size: int = 30,
+) -> ReliabilityAssessment:
+    """Assign a reliability tier to one metric's bootstrap result.
+
+    Rules, all evaluated (reasons accumulate); tier is the most severe that
+    fired:
+
+    ==  ==================================================  ==================
+    #   Condition                                           Tier
+    ==  ==================================================  ==================
+    0   ``n_valid_iterations == 0`` (every resample failed)  insufficient_data
+    1   any ``sample_sizes[g] < min_group_size``             insufficient_data
+    2   ``n_skipped_single_group / n_valid_iterations`` > 5%  insufficient_data
+    3   ``ci_upper - ci_lower`` > 0.15                        unstable
+    4   ``bootstrap SD`` > 0.05                               unstable
+    5   none of the above                                    reliable
+    ==  ==================================================  ==================
+    """
+    if not isinstance(sample_sizes, dict) or not sample_sizes:
+        raise ValueError("sample_sizes must be a non-empty {group: count} dict")
+    if min_group_size < 1:
+        raise ValueError(f"min_group_size must be >= 1, got {min_group_size}")
+
+    reasons: list[str] = []
+    insufficient = False
+    unstable = False
+
+    n_valid = bootstrap_result.n_valid_iterations
+    n_skipped_sg = bootstrap_result.n_skipped_single_group
+    ci_width = bootstrap_result.ci_upper - bootstrap_result.ci_lower
+    sd = bootstrap_result.bootstrap_distribution_summary.get("std")
+
+    # Rule 0 — nothing was computed.
+    if n_valid == 0:
+        insufficient = True
+        reasons.append(
+            "All bootstrap resamples failed — no estimate could be computed, "
+            "so no verdict is possible."
+        )
+
+    # Rule 1 — a group is below the hard floor.
+    for group, size in sample_sizes.items():
+        if size < min_group_size:
+            insufficient = True
+            reasons.append(
+                f"Group '{group}' has only {int(size)} samples (minimum "
+                f"{min_group_size} required for reliable estimation)."
+            )
+
+    # Rule 2 — resamples keep collapsing to one group.
+    if n_valid > 0:
+        skip_fraction = n_skipped_sg / n_valid
+        if skip_fraction > SINGLE_GROUP_SKIP_BLOCK_THRESHOLD:
+            insufficient = True
+            reasons.append(
+                f"{skip_fraction:.1%} of bootstrap resamples collapsed to a "
+                f"single group — sample size or class balance is insufficient "
+                f"for a reliable estimate."
+            )
+
+    # Rule 3 — the interval is too wide to act on.
+    if np.isfinite(ci_width) and ci_width > CI_WIDTH_UNSTABLE_THRESHOLD:
+        unstable = True
+        reasons.append(
+            f"95% confidence interval spans {ci_width:.3f} — too wide for a "
+            f"precise verdict."
+        )
+
+    # Rule 4 — the estimate moves a lot across resamples.
+    if sd is not None and np.isfinite(sd) and sd > BOOTSTRAP_SD_UNSTABLE_THRESHOLD:
+        unstable = True
+        reasons.append(
+            f"Bootstrap distribution standard deviation ({sd:.3f}) indicates "
+            f"high estimate variability."
+        )
+
+    if insufficient:
+        tier = "insufficient_data"
+    elif unstable:
+        tier = "unstable"
+    else:
+        tier = "reliable"
+        reasons = [
+            f"All reliability checks passed: every group has at least "
+            f"{min_group_size} samples, under 5% of bootstrap resamples failed, "
+            f"the 95% CI width is within {CI_WIDTH_UNSTABLE_THRESHOLD}, and the "
+            f"bootstrap SD is within {BOOTSTRAP_SD_UNSTABLE_THRESHOLD}."
+        ]
+
+    return ReliabilityAssessment(
+        tier=tier,
+        reasons=reasons,
+        blocks_verdict=(tier == "insufficient_data"),
+    )

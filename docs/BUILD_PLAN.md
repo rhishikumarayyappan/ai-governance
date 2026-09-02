@@ -308,12 +308,33 @@ Five simultaneous tests inflate false-positive probability. Implement:
 - The compliance mapper uses the **corrected** threshold, always
 
 ### Reliability Assessment
-Run the full suite N times (default 5) with different random seeds on bootstrap samples. Report the standard deviation of each metric.
-- SD < 0.02 → "reliable"
-- SD 0.02–0.05 → "unstable"
-- SD > 0.05 or n < 100 per group → "insufficient_data"
 
-A result flagged "insufficient_data" **cannot** produce a compliance verdict. It produces "indeterminate — insufficient sample."
+> **Revised 2026-09-02 during Component 2.3 implementation** (was: "SD < 0.02 →
+> reliable / 0.02–0.05 → unstable / SD > 0.05 or n < 100 per group →
+> insufficient_data", via an N-run reseed). The draft conflated *measured
+> uncertainty on an estimate that was computed* with *data that cannot support
+> an estimate at all* — those are different tiers. It also specified an N-run
+> reseed, which would multiply the ~4s/metric bootstrap cost by N for a signal
+> the single 1,000-iteration bootstrap distribution already carries. The rule
+> table below is what is implemented in `assess_reliability`.
+
+`assess_reliability(bootstrap_result, sample_sizes, min_group_size=30)` reads the
+standard deviation, CI width and skip counts from the single 1,000-iteration
+bootstrap distribution computed for the metric. All rules are evaluated and
+every firing rule is reported in `reasons`; `tier` is the most severe that fired.
+
+| Condition | Tier |
+|---|---|
+| every bootstrap resample failed (`n_valid_iterations == 0`) | `insufficient_data` |
+| any group has fewer than `min_group_size` (default 30) samples | `insufficient_data` |
+| more than 5% of resamples collapsed to a single group | `insufficient_data` |
+| 95% CI width > 0.15 | `unstable` |
+| bootstrap SD > 0.05 | `unstable` |
+| none of the above | `reliable` |
+
+A result flagged `insufficient_data` **cannot** produce a compliance verdict
+(`blocks_verdict == True`). It produces "indeterminate — insufficient sample."
+`unstable` degrades confidence but still reports.
 
 ## Component 2.2 — Threshold Justification
 
