@@ -1,21 +1,143 @@
 # AI Governance Platform — Progress Log
 
 ## Current Status
-- **Phase 2 — IN PROGRESS.** `statistics.py` computation layer COMPLETE:
-  significance 1.4, bootstrap CIs 1.3, correction 1.1, reliability 1.8,
-  **Simpson's paradox 1.5/9.9, metric tensions 1.9**. `THRESHOLDS.md` written
-  (1.2 → 🟡 — doc done, per-system config + audit still to build).
+- **Phase 2 — IN PROGRESS.** `statistics.py` computation layer COMPLETE
+  (1.1, 1.3, 1.4, 1.5, 1.8, 1.9, 9.9). **TestResult wiring sub-step COMPLETE** —
+  CI + reliability tier + p-value + corrected threshold now actually persisted
+  on every run, not just computable. `THRESHOLDS.md` written.
+- **Only Part B — per-system threshold config + audit log (rest of 1.2) —
+  remains before the Phase 3 gate opens.**
 - Phase 1 COMPLETE (Weeks 1–2 + Week 3 benchmark validation).
 - Working to **BUILD_PLAN v2.0** (10 phases, 9 gap categories, `docs/GAP_CHECKLIST.md` is the authoritative tracker)
 - Overall health: **Green**
-- **54 tests passing, 0 failures** (~54s — bootstrap loops dominate)
+- **66 tests passing, 0 failures** (~4 min full suite; `pytest -m "not statistical"`
+  ≈ 2 min — see Session 13 note on the runtime finding)
 - Last updated: 2026-09-02
-- Next: the wiring sub-step — CI / p-value / corrected threshold / reliability
-  flag onto `TestResult` rows; per-system threshold config + audit for the rest
-  of 1.2. First `engine.py` / `TestResult` model changes this phase.
-- **Discovered gaps:** 9.11 ✅ (`_PASS_BAND_FRACTION` named in `bias.py` +
-  `statistics.py`), 9.12 ✅ (renamed `individual_fairness_score` →
-  `overall_accuracy_floor`), 9.13 ⬜ (genuine consistency metric — Phase 4).
+- Next: **Part B** — `system_thresholds` + `threshold_audit_log` tables,
+  `PUT/GET /api/v1/systems/{id}/thresholds`, engine reads per-system overrides
+  once per run, THRESHOLDS.md Configuration Roadmap rewritten. Design already
+  agreed (see Session 13 note); nothing from today's work changes it.
+- **Discovered gaps:** 9.11 ✅, 9.12 ✅, 9.13 ⬜ (genuine consistency metric — Phase 4).
+
+### Session 13 note (2026-09-02) — Part A: TestResult statistical wiring (COMPLETE)
+
+The first session this phase to touch `bias.py` region / `engine.py` / the DB
+schema. Everything through Session 12 lived in `statistics.py` alone. Built in
+4 confirmed-before-coded steps.
+
+**1. `permutation_p_value` (new fn in `statistics.py`, purely additive).**
+`significance_test` and its internal `_permutation_p_value` untouched.
+Generalises the DP-hardcoded permutation test to any `METRIC_WRAPPERS` metric so
+the engine can get a p-value for each fairness metric and then correct across
+them. Validated in isolation first: with `metric_fn=demographic_parity_wrapper`
+it reproduces `significance_test(method="permutation")` **bit-for-bit** across
+seeds 1/999/42 and the no-association case — proof the shared shuffling logic is
+consistent before trusting it on the 4 metrics with no independent reference.
+
+**2. `TestResult` schema — 7 nullable columns.** `confidence_interval_lower`,
+`confidence_interval_upper`, `p_value`, `corrected_threshold`,
+`correction_method`, `reliability_tier`, `sample_size`. All nullable — pre-Phase-2
+rows carry none. `scripts/migrate_add_testresult_stats.py`: idempotent
+`ALTER TABLE ADD COLUMN` for a pre-existing SQLite file (no Alembic until Phase
+7); checks `PRAGMA table_info` first. Tested (synthetic old-schema DB with a row:
+adds 7, re-run adds 0, existing row's new cols NULL, existing data byte-identical
+before/after a no-op run) and run against the real `ai_governance.db` — which
+turned out to be **empty** (0 rows everywhere), stated explicitly rather than
+assumed.
+
+**3. `engine.py` wiring — the first behaviour change of the phase.** Per
+protected attribute, after `BiasTestSuite.run()`:
+`_compute_attribute_statistics` runs a bootstrap 95% CI + reliability tier for
+all 5 metrics, a permutation p-value for the 4 fairness-gap metrics, and one
+Bonferroni correction across those 4 as a family. Persisted onto the new
+columns. When `assess_reliability` returns `insufficient_data`, the persisted
+`status` is `"indeterminate"` — set by the engine, never by `BiasTestSuite`
+(which still only produces pass/warn/fail; its "exactly 5 in fixed order"
+contract is unchanged). New `is_pass(status)` helper + `TEST_RESULT_STATUSES`
+in `models.py`: returns True only for an explicit `"pass"` — the Phase 5
+compliance mapper MUST use it, never `status != "fail"`, or an `"indeterminate"`
+row gets silently counted as compliant. `random_state` pinned (default 42) so a
+re-run reproduces the CIs and p-values — verified byte-identical across runs.
+
+**4-vs-5 correction — the key design decision.** Confirmed with the owner after
+several rounds. `overall_accuracy_floor` is **excluded** from the p-value +
+correction family: shuffling group labels cannot change overall accuracy, so a
+permutation p-value for it is structurally 1.0 — there is no group-comparison
+hypothesis to test significance against. It still gets a CI + reliability tier +
+sample_size (a CI reflects estimate stability under resampling, which applies to
+a plain accuracy number). Its `p_value` / `corrected_threshold` /
+`correction_method` are `NULL` — **not missing data, structurally not
+applicable**. This finding is exactly what the "confirm before code" pace was
+for: a faster session would have shipped 5-way correction with a meaningless
+p=1.0 diluting the Bonferroni divisor (÷5 instead of ÷4), over-penalising the 4
+real tests, and it would have looked fine in every test until someone reasoned
+about what a permutation test on a non-comparative metric even means.
+Correction scope is **per protected attribute** — a run testing gender + race
+runs two independent 4-metric corrections, never one across all 8.
+
+**The key technical finding — runtime is iteration-bound, not size-bound.**
+Each run does 9 × 1,000-iteration resampling loops (5 bootstrap + 4 permutation)
+per attribute ≈ ~9,000 `fairlearn.MetricFrame` calls, each ~4 ms of fixed
+overhead **regardless of n** until n gets large. So a 20-row run and a 200-row
+run cost nearly the same (~38 s). Bumping the test fixtures to n=140 for the
+`insufficient_data` floor (option B, agreed) did not buy speed. This matters for
+Phase 3+ (generative bias testing, intersectional) which add more statistical
+tests on the same machinery — the cost multiplies by test count, not data size.
+Production stays at 1,000 (the CI/p-value need it; `run_bias_tests` docstring
+states the cost and points at Phase 7 async). The `@pytest.mark.statistical`
+marker + `pytest -m "not statistical"` gives a fast dev subset.
+
+**Runtime fix (agreed):** a module-scoped autouse fixture in `test_engine.py`
+and `test_api_testing.py` only (NOT top-level conftest — structurally cannot
+reach the value-asserting tests) monkeypatches `engine._BOOTSTRAP_ITERATIONS` /
+`_PERMUTATION_ITERATIONS` from 1,000 → **100**. Verified 100 gives the *same*
+`reliability_tier` as 1,000 for those fixtures (all "unstable" — 140 rows of
+noise genuinely can't support a tight estimate) and single-group skips stay 0
+with a 70/70 split. The 4 value-asserting behaviour tests live in a separate
+file `tests/test_engine_statistics.py` (marked `statistical`, real 1,000
+iterations, ~3 min for the 4). Full suite ≈ 4 min; `-m "not statistical"` ≈ 2 min.
+
+**Part A tests (4, per the wiring-prompt Step 4 list):** large clean run →
+every column populated, CI brackets point estimate, DP + accuracy-floor tiers
+"reliable", 4-gap corrected_threshold = 0.05/4, accuracy-floor's 3 correction
+columns NULL. Tiny group (15 in B) → every metric `insufficient_data` →
+`status="indeterminate"`, never "pass". Correction changes a verdict —
+`equalized_odds` (p≈0.019) and `equal_opportunity` (p≈0.023) are raw-significant
+but not after Bonferroni tightens the bar to 0.0125 — proof correction is wired,
+not just computed. Engine still persists exactly 5 metrics. Plus 4 migration
+tests + 2 `is_pass`/status-contract tests + 3 `permutation_p_value` tests.
+
+**Part B is deferred to next session — explicitly not started today.** Design
+unchanged from the earlier confirmation:
+- `system_thresholds` — **one row per (system_id, metric_name), upserted** (no
+  `active` flag; the owner's improvement on the original active-flag sketch,
+  which mixed current-state and history in one table and forced a
+  `WHERE active=true` on every engine lookup). `threshold_audit_log` — the sole
+  append-only history: `old_value` (None on first custom set), `new_value`,
+  `changed_by`, `changed_at`, `reason` (`nullable=False` + service-layer
+  non-empty check + API 422).
+- Both writes in **one transaction** — audit-write failure rolls back the
+  threshold change. A test monkeypatches the audit insert to raise and asserts
+  atomicity.
+- `PUT /api/v1/systems/{id}/thresholds` (body: `metric_name`, `new_value`,
+  `reason`, `changed_by`; 404 unknown system, 422 unknown metric / value ∉ (0,1)
+  / empty reason). `GET .../thresholds` (+ `?include_history=true`). Endpoints
+  in `registry/router.py` + `registry/thresholds.py` service. `changed_by` is a
+  **self-reported, unverified** body field until Phase 7 auth — stated plainly
+  in the response schema and THRESHOLDS.md.
+- Engine reads overrides **once per run** in Stage A → `BiasTestSuite(thresholds=…)`.
+- Part B Test 1 is a **genuine end-to-end integration test**: register system,
+  baseline run + note verdict, PUT a custom threshold with a real reason, re-run
+  same data, confirm the persisted `status` + `corrected_threshold` reflect the
+  new bar, confirm a second untouched system still uses defaults.
+- Then THRESHOLDS.md Configuration Roadmap rewrite: any API caller can change
+  thresholds (no auth yet — stated), changes logged with mandatory reason,
+  historical results tied to their run's threshold.
+
+**Commits:** `c6d3640` (permutation_p_value), `188fbe0` (schema + migration),
++ Step 3 (engine wiring + BUILD_PLAN 4-vs-5 + `is_pass`). Pushed at EOD.
+
+**Exact next step:** Part B, then Phase 2 is complete and the Phase 3 gate opens.
 
 ### Session 12 note (2026-09-02) — rename `individual_fairness_score` → `overall_accuracy_floor` (9.12), close 9.11
 
@@ -583,20 +705,20 @@ Component 2.1 — Statistical Testing Module (`governance/testing/statistics.py`
 - [x] Reliability scoring — `assess_reliability`, three-tier,
       "insufficient_data" blocks verdict (rule set revised from BUILD_PLAN draft;
       BUILD_PLAN.md updated to match)
-- [x] `tests/test_statistics.py` — 34 tests (8 significance + 6 bootstrap +
-      5 correction + 5 reliability + 5 Simpson's + 5 tensions)
-- [ ] Wire CI / p-value / corrected threshold / reliability flag onto
-      `TestResult` rows (separate sub-step — touches `bias.py`/`engine.py`/models)
+- [x] `tests/test_statistics.py` — significance / bootstrap / correction /
+      reliability / Simpson's / tensions / `permutation_p_value`
+- [x] **Wire CI / p-value / corrected threshold / reliability tier onto
+      `TestResult` rows (Session 13)** — `engine.py._compute_attribute_statistics`;
+      `status="indeterminate"` when reliability blocks; `is_pass()` guard rail;
+      `scripts/migrate_add_testresult_stats.py`; 4-vs-5 correction split
+- [ ] **Part B — per-system threshold config + audit log (rest of 1.2)** — next session
 
-Component 2.2 — `THRESHOLDS.md` **written** (gap 1.2 → 🟡). Permutation-p-value
-add-one-smoothing carry-over TODO from Session 7: **done** (#16 in the file).
-Remaining for 1.2: per-system threshold config + audit-log on change.
-Component 2.3 — Simpson's paradox detection **done** (`detect_simpsons_paradox`).
-Component 2.4 — Metric tension detection **done** (`detect_metric_tensions` in
-`statistics.py`; moves to `compliance/tensions.py` in Phase 5).
+Component 2.2 — `THRESHOLDS.md` **written**; permutation add-one-smoothing note done (#16).
+**Rest of 1.2 = Part B (below), the last Phase 2 item.**
+Component 2.3 — Simpson's paradox **done**.  Component 2.4 — Metric tensions **done**.
 
-Gap tracker: **1.1, 1.3, 1.4, 1.5, 1.8, 1.9, 9.9 ✅ closed.** 1.2 🟡 (doc done).
-Discovered: 9.11 🟡, 9.12 ⬜. See `docs/GAP_CHECKLIST.md`.
+Gap tracker: **1.1, 1.3, 1.4, 1.5, 1.8, 1.9, 9.9, 9.11, 9.12 ✅.** 1.2 🟡 (THRESHOLDS.md
+done + statistics now persisted; per-system config + audit is Part B). 9.13 ⬜ (Phase 4).
 
 ---
 
