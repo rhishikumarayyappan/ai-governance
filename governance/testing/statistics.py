@@ -1,39 +1,62 @@
-"""Statistical rigour layer — Component 2.1: significance testing.
+"""Statistical rigour layer — Phase 2 (Component 2.1).
 
-Answers one question for a single protected attribute: *could this
-demographic-parity gap in the model's predictions plausibly be random noise?*
+Two capabilities, both operating on a single protected attribute:
+
+1. **Significance testing** (``significance_test``) — *could this
+   demographic-parity gap in the model's predictions plausibly be random noise?*
+   Four tests: chi-squared, Fisher's exact, two-proportion z-test, permutation;
+   an ``auto`` selector; an always-on permutation cross-check.
+
+2. **Bootstrap confidence intervals** (``bootstrap_confidence_interval`` +
+   five metric wrappers) — *if we resampled this test set many times, where
+   would the true gap most likely fall?* Generic over any
+   ``(y_true, y_pred, sensitive_features) -> float`` metric.
 
 This module is a **sibling** of ``bias.py`` — it is called alongside
 ``BiasTestSuite``, never wraps it, and never imports from it (and ``bias.py``
-never imports from here). The fairlearn metric used for the permutation test is
-imported directly from fairlearn so the permuted statistic matches exactly what
-``BiasTestSuite`` reports.
-
-Scope of THIS component (Phase 2, Component 2.1 — significance only):
-  * four tests — chi-squared, Fisher's exact, two-proportion z-test, permutation
-  * an ``auto`` selector that picks the right one by group count and cell size
-  * an always-on permutation cross-check attached to every result
+never imports from here). Every fairlearn / sklearn metric used here is imported
+directly from its library so the numbers match exactly what ``BiasTestSuite``
+reports.
 
 Explicitly NOT in scope here (later pieces of Phase 2 / Phase 4):
-  * bootstrap confidence intervals, Bonferroni / Benjamini-Hochberg correction,
-    reliability scoring  — later in Component 2.1
+  * Bonferroni / Benjamini-Hochberg correction, reliability scoring — next in
+    Phase 2
   * continuous or multi-class model outputs — Phase 4 (``regression.py`` etc.)
   * general R×C chi-squared — would be its own component with its own tests
 
-See docs/BUILD_PLAN.md → "PHASE 2 → Component 2.1 → Significance Testing" and
-docs/GAP_CHECKLIST.md → Category 1, gap 1.4.
+See docs/BUILD_PLAN.md → "PHASE 2" and docs/GAP_CHECKLIST.md → Category 1
+(gap 1.4 significance testing, gap 1.3 confidence intervals).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 import numpy as np
 import pandas as pd
-from fairlearn.metrics import demographic_parity_difference
+from fairlearn.metrics import (
+    MetricFrame,
+    demographic_parity_difference,
+    equal_opportunity_difference,
+    equalized_odds_difference,
+)
 from scipy.stats import chi2_contingency, fisher_exact, norm
+from sklearn.metrics import accuracy_score, precision_score
 
-__all__ = ["SignificanceResult", "significance_test", "VALID_METHODS"]
+__all__ = [
+    "SignificanceResult",
+    "significance_test",
+    "VALID_METHODS",
+    "BootstrapResult",
+    "bootstrap_confidence_interval",
+    "demographic_parity_wrapper",
+    "equalized_odds_wrapper",
+    "equal_opportunity_wrapper",
+    "predictive_parity_wrapper",
+    "individual_fairness_wrapper",
+    "METRIC_WRAPPERS",
+]
 
 # --------------------------------------------------------------------------- #
 # Module constants
@@ -493,3 +516,287 @@ def significance_test(
         sample_sizes=sample_sizes,
         detail=detail,
     )
+
+
+# =========================================================================== #
+# Bootstrap confidence intervals (Phase 2 — gap 1.3)
+# =========================================================================== #
+
+DEFAULT_BOOTSTRAP_ITERATIONS = 1_000
+SINGLE_GROUP_SKIP_THRESHOLD = 0.05   # skipped fraction above this flags the CI
+
+# metric_fn contract: (y_true, y_pred, sensitive_features) -> float
+MetricFn = Callable[..., float]
+
+
+@dataclass
+class BootstrapResult:
+    """A bootstrap 95% (or other) confidence interval for one fairness metric.
+
+    Attributes
+    ----------
+    point_estimate : float
+        ``metric_fn`` evaluated once on the full, unresampled data. This is the
+        number a report shows; ``nan`` only if the metric could not be computed
+        even on the full data.
+    ci_lower, ci_upper : float
+        The ``(1-c)/2`` and ``1-(1-c)/2`` percentiles of the bootstrap
+        distribution. ``nan`` / ``nan`` when every iteration was skipped.
+    confidence_level : float
+        As requested (default 0.95).
+    n_iterations : int
+        Iterations requested.
+    bootstrap_distribution_summary : dict
+        ``{"min", "max", "std"}`` over the *valid* resample values — for
+        diagnosing an oddly shaped distribution, not for reporting. (No mean or
+        median on purpose: ``point_estimate`` is unambiguously "the" number.)
+    n_valid_iterations : int
+        Iterations that produced a usable value.
+    n_skipped_single_group : int
+        Resamples that by chance contained only one group (metric undefined).
+    reliability_warning : str | None
+        ``None`` unless the skipped fraction exceeds
+        ``SINGLE_GROUP_SKIP_THRESHOLD`` (5%) or every iteration failed. When set,
+        the text is specific: how many were skipped, why, and what it means.
+        Component 2.3's reliability scoring consumes this.
+    skip_breakdown : dict
+        ``{reason: count}`` for every skipped iteration — ``"single_group"``,
+        ``"non_finite_value"``, or an exception type name
+        (e.g. ``"ValueError"``). Always present (may be empty). Lets a developer
+        chasing a high skip rate tell the causes apart without re-running.
+    """
+
+    point_estimate: float
+    ci_lower: float
+    ci_upper: float
+    confidence_level: float
+    n_iterations: int
+    bootstrap_distribution_summary: dict
+    n_valid_iterations: int
+    n_skipped_single_group: int
+    reliability_warning: str | None
+    skip_breakdown: dict = field(default_factory=dict)
+
+
+def _bump(d: dict, key: str) -> None:
+    d[key] = d.get(key, 0) + 1
+
+
+def bootstrap_confidence_interval(
+    metric_fn: MetricFn,
+    y_true,
+    y_pred,
+    sensitive_features,
+    n_iterations: int = DEFAULT_BOOTSTRAP_ITERATIONS,
+    confidence_level: float = 0.95,
+    random_state: int | None = None,
+) -> BootstrapResult:
+    """Percentile bootstrap CI for any fairness metric.
+
+    ``metric_fn`` must accept ``(y_true, y_pred, sensitive_features)`` and return
+    a single float. Use the five wrappers in this module (or
+    ``METRIC_WRAPPERS``) for the BiasTestSuite metrics.
+
+    Resampling draws **one** vector of row indices with replacement per
+    iteration and applies it to all three arrays, so each synthetic row keeps
+    its real ``(group, prediction, label)`` triple — the joint relationship the
+    metric measures is preserved. ``sensitive_features`` is converted to a
+    positional array first, so a pandas index cannot misalign the draw.
+
+    Degenerate resamples (only one group present) and any ``metric_fn`` failure
+    are **skipped, not fatal** — counted in ``skip_breakdown``. If more than 5%
+    of iterations are skipped the result carries a ``reliability_warning``; if
+    all fail, the CI is ``nan`` with a specific warning rather than an exception.
+
+    Parameters
+    ----------
+    random_state : int | None
+        Fixed int → identical result every call (seeding is wired through a
+        single ``np.random.default_rng``). ``None`` → true randomness.
+    """
+    if not 0.0 < confidence_level < 1.0:
+        raise ValueError(
+            f"confidence_level must be in (0, 1), got {confidence_level}"
+        )
+    if n_iterations < 1:
+        raise ValueError(f"n_iterations must be >= 1, got {n_iterations}")
+
+    yp = np.asarray(y_pred)
+    n = len(yp)
+    if n == 0:
+        raise ValueError("cannot bootstrap an empty dataset")
+    yt = None if y_true is None else np.asarray(y_true)
+    sf = np.asarray(sensitive_features)
+    if len(sf) != n or (yt is not None and len(yt) != n):
+        raise ValueError(
+            "y_true, y_pred and sensitive_features must all be the same length"
+        )
+
+    # ---- point estimate on the full data -------------------------------- #
+    try:
+        point_estimate = float(metric_fn(yt, yp, sf))
+    except Exception as exc:  # noqa: BLE001 - reported, never raised
+        point_estimate = float("nan")
+        point_note = f"point estimate could not be computed ({type(exc).__name__})"
+    else:
+        point_note = None
+
+    # ---- the bootstrap loop ------------------------------------------- #
+    rng = np.random.default_rng(random_state)
+    values: list[float] = []
+    skip_breakdown: dict[str, int] = {}
+
+    for _ in range(n_iterations):
+        idx = rng.integers(0, n, size=n)
+        sf_bs = sf[idx]
+        if np.unique(sf_bs).size < 2:
+            _bump(skip_breakdown, "single_group")
+            continue
+        try:
+            value = float(
+                metric_fn(None if yt is None else yt[idx], yp[idx], sf_bs)
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad resample must not kill the CI
+            _bump(skip_breakdown, type(exc).__name__)
+            continue
+        if not np.isfinite(value):
+            _bump(skip_breakdown, "non_finite_value")
+            continue
+        values.append(value)
+
+    n_valid = len(values)
+    n_skipped_total = n_iterations - n_valid
+    n_skipped_single_group = skip_breakdown.get("single_group", 0)
+
+    lower_pct = (1.0 - confidence_level) / 2.0 * 100.0
+    upper_pct = 100.0 - lower_pct
+
+    if n_valid == 0:
+        ci_lower = ci_upper = float("nan")
+        summary = {"min": float("nan"), "max": float("nan"), "std": float("nan")}
+        reliability_warning = (
+            f"all {n_iterations} iterations failed — CI could not be computed, "
+            f"sample size or class balance likely insufficient for this metric "
+            f"(skip breakdown: {skip_breakdown})"
+        )
+    else:
+        arr = np.asarray(values, dtype=float)
+        ci_lower, ci_upper = (
+            float(x) for x in np.percentile(arr, [lower_pct, upper_pct])
+        )
+        summary = {
+            "min": float(arr.min()),
+            "max": float(arr.max()),
+            "std": float(arr.std()),
+        }
+        skipped_fraction = n_skipped_total / n_iterations
+        if skipped_fraction > SINGLE_GROUP_SKIP_THRESHOLD:
+            reliability_warning = (
+                f"{n_skipped_total}/{n_iterations} resamples ({skipped_fraction:.1%}) "
+                f"were skipped — CI may be unreliable due to small sample size or "
+                f"group imbalance (skip breakdown: {skip_breakdown})"
+            )
+        else:
+            reliability_warning = None
+
+    # Fold in a point-estimate failure note, if any.
+    if point_note:
+        reliability_warning = (
+            point_note if reliability_warning is None
+            else f"{point_note}; {reliability_warning}"
+        )
+
+    return BootstrapResult(
+        point_estimate=point_estimate,
+        ci_lower=ci_lower,
+        ci_upper=ci_upper,
+        confidence_level=confidence_level,
+        n_iterations=n_iterations,
+        bootstrap_distribution_summary=summary,
+        n_valid_iterations=n_valid,
+        n_skipped_single_group=n_skipped_single_group,
+        reliability_warning=reliability_warning,
+        skip_breakdown=skip_breakdown,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Metric wrappers — adapt each BiasTestSuite metric to the metric_fn shape.
+# These call fairlearn / sklearn directly; they never import from bias.py.
+# --------------------------------------------------------------------------- #
+def _require_y_true(y_true, name: str):
+    if y_true is None:
+        raise ValueError(f"{name} needs y_true — it conditions on the true label")
+    return np.asarray(y_true)
+
+
+def demographic_parity_wrapper(y_true, y_pred, sensitive_features) -> float:
+    """|selection-rate gap| across groups. y_true is unused (tolerates None)."""
+    yt = y_pred if y_true is None else y_true
+    return float(
+        abs(
+            demographic_parity_difference(
+                yt, y_pred, sensitive_features=np.asarray(sensitive_features)
+            )
+        )
+    )
+
+
+def equalized_odds_wrapper(y_true, y_pred, sensitive_features) -> float:
+    yt = _require_y_true(y_true, "equalized_odds_wrapper")
+    return float(
+        abs(
+            equalized_odds_difference(
+                yt, y_pred, sensitive_features=np.asarray(sensitive_features)
+            )
+        )
+    )
+
+
+def equal_opportunity_wrapper(y_true, y_pred, sensitive_features) -> float:
+    yt = _require_y_true(y_true, "equal_opportunity_wrapper")
+    return float(
+        abs(
+            equal_opportunity_difference(
+                yt, y_pred, sensitive_features=np.asarray(sensitive_features)
+            )
+        )
+    )
+
+
+def predictive_parity_wrapper(y_true, y_pred, sensitive_features) -> float:
+    """max - min group precision. Mirrors bias.py exactly, including
+    ``zero_division=0`` (a group with no predicted positives scores 0.0, it
+    does not raise)."""
+    yt = _require_y_true(y_true, "predictive_parity_wrapper")
+    yp = np.asarray(y_pred)
+    groups = np.asarray(sensitive_features)
+    precisions = []
+    for g in pd.unique(pd.Series(groups)):
+        mask = groups == g
+        precisions.append(
+            float(precision_score(yt[mask], yp[mask], zero_division=0))
+        )
+    return float(max(precisions) - min(precisions)) if precisions else 0.0
+
+
+def individual_fairness_wrapper(y_true, y_pred, sensitive_features) -> float:
+    """Overall accuracy (0-1). NOT a difference and NOT absolute-valued —
+    matches bias.py's inverted-threshold metric 5 (fail below 0.80)."""
+    yt = _require_y_true(y_true, "individual_fairness_wrapper")
+    frame = MetricFrame(
+        metrics=accuracy_score,
+        y_true=yt,
+        y_pred=np.asarray(y_pred),
+        sensitive_features=np.asarray(sensitive_features),
+    )
+    return float(frame.overall)
+
+
+METRIC_WRAPPERS: dict[str, MetricFn] = {
+    "demographic_parity_difference": demographic_parity_wrapper,
+    "equalized_odds_difference": equalized_odds_wrapper,
+    "equal_opportunity_difference": equal_opportunity_wrapper,
+    "predictive_parity_difference": predictive_parity_wrapper,
+    "individual_fairness_score": individual_fairness_wrapper,
+}

@@ -16,7 +16,17 @@ import pandas as pd
 import pytest
 from scipy.stats import chi2_contingency, norm
 
-from governance.testing.statistics import ALPHA, significance_test
+from governance.testing.statistics import (
+    ALPHA,
+    METRIC_WRAPPERS,
+    bootstrap_confidence_interval,
+    demographic_parity_wrapper,
+    equal_opportunity_wrapper,
+    equalized_odds_wrapper,
+    individual_fairness_wrapper,
+    predictive_parity_wrapper,
+    significance_test,
+)
 
 
 def _labels(pos: int, total: int) -> list[int]:
@@ -187,3 +197,141 @@ def test_two_group_only_methods_reject_more_than_two_groups():
     g = pd.Series(["A", "A", "B", "B", "C", "C"])
     with pytest.raises(ValueError, match="permutation"):
         significance_test(y, y, g, method="chi_squared")
+
+
+# =========================================================================== #
+# Bootstrap confidence intervals — Phase 2, gap 1.3
+# =========================================================================== #
+def _grouped_predictions(n_per_group, p_a, p_b, seed):
+    """n_per_group rows in group A at positive-rate p_a, likewise B at p_b."""
+    rng = np.random.default_rng(seed)
+    y_pred = np.concatenate(
+        [
+            rng.choice([0, 1], n_per_group, p=[1 - p_a, p_a]),
+            rng.choice([0, 1], n_per_group, p=[1 - p_b, p_b]),
+        ]
+    )
+    groups = pd.Series(["A"] * n_per_group + ["B"] * n_per_group)
+    return y_pred, groups
+
+
+# --------------------------------------------------------------------------- #
+# Test 1 — the CI always contains its own point estimate
+# --------------------------------------------------------------------------- #
+def test_ci_contains_point_estimate():
+    y_pred, groups = _grouped_predictions(400, p_a=0.7, p_b=0.4, seed=1)
+    result = bootstrap_confidence_interval(
+        demographic_parity_wrapper, y_pred, y_pred, groups,
+        n_iterations=400, random_state=7,
+    )
+    assert result.ci_lower <= result.point_estimate <= result.ci_upper
+    assert result.n_valid_iterations == 400
+
+
+# --------------------------------------------------------------------------- #
+# Test 2 — narrow CI on large, stable data (and no false reliability warning)
+# --------------------------------------------------------------------------- #
+def test_narrow_ci_on_large_sample():
+    # 1,500 per group, a wide and consistent gap → tight binomial variance.
+    y_pred, groups = _grouped_predictions(1500, p_a=0.9, p_b=0.1, seed=2)
+    result = bootstrap_confidence_interval(
+        demographic_parity_wrapper, y_pred, y_pred, groups,
+        n_iterations=1000, random_state=2,
+    )
+    assert (result.ci_upper - result.ci_lower) < 0.05
+    assert result.reliability_warning is None
+    assert result.n_skipped_single_group == 0
+
+
+# --------------------------------------------------------------------------- #
+# Test 3 — wide CI on small, noisy data (bootstrap is sample-size sensitive)
+# --------------------------------------------------------------------------- #
+def test_wide_ci_on_small_sample():
+    small_pred, small_groups = _grouped_predictions(10, p_a=0.9, p_b=0.1, seed=3)
+    large_pred, large_groups = _grouped_predictions(1500, p_a=0.9, p_b=0.1, seed=3)
+
+    small = bootstrap_confidence_interval(
+        demographic_parity_wrapper, small_pred, small_pred, small_groups,
+        n_iterations=1000, random_state=3,
+    )
+    large = bootstrap_confidence_interval(
+        demographic_parity_wrapper, large_pred, large_pred, large_groups,
+        n_iterations=1000, random_state=3,
+    )
+    small_width = small.ci_upper - small.ci_lower
+    large_width = large.ci_upper - large.ci_lower
+
+    assert small_width > large_width * 3   # dramatically wider, not marginally
+    assert small_width > 0.15
+
+
+# --------------------------------------------------------------------------- #
+# Test 4 — all five metric wrappers produce valid BootstrapResults
+# --------------------------------------------------------------------------- #
+def test_all_five_wrappers_work():
+    rng = np.random.default_rng(4)
+    n = 400
+    groups = pd.Series(["A"] * n + ["B"] * n)
+    y_true = rng.integers(0, 2, 2 * n)
+    # Predictions: mostly right, with a group-dependent error skew.
+    flip = rng.random(2 * n) < np.where(groups.to_numpy() == "A", 0.15, 0.30)
+    y_pred = np.where(flip, 1 - y_true, y_true)
+
+    for name, wrapper in METRIC_WRAPPERS.items():
+        result = bootstrap_confidence_interval(
+            wrapper, y_true, y_pred, groups, n_iterations=300, random_state=4,
+        )
+        assert np.isfinite(result.point_estimate), name
+        assert result.ci_lower <= result.point_estimate <= result.ci_upper, name
+        assert result.n_valid_iterations > 0, name
+        assert set(result.bootstrap_distribution_summary) == {"min", "max", "std"}
+
+
+# --------------------------------------------------------------------------- #
+# Test 5 — a fixed seed produces byte-identical results
+# --------------------------------------------------------------------------- #
+def test_fixed_seed_is_reproducible():
+    y_pred, groups = _grouped_predictions(300, p_a=0.65, p_b=0.45, seed=5)
+    kwargs = dict(n_iterations=250, random_state=99)
+
+    a = bootstrap_confidence_interval(
+        demographic_parity_wrapper, y_pred, y_pred, groups, **kwargs
+    )
+    b = bootstrap_confidence_interval(
+        demographic_parity_wrapper, y_pred, y_pred, groups, **kwargs
+    )
+    assert a.point_estimate == b.point_estimate
+    assert a.ci_lower == b.ci_lower
+    assert a.ci_upper == b.ci_upper
+    assert a.bootstrap_distribution_summary == b.bootstrap_distribution_summary
+
+
+# --------------------------------------------------------------------------- #
+# Test 6 — single-group resamples are skipped, tracked, and flagged
+# --------------------------------------------------------------------------- #
+def test_single_group_resample_is_handled():
+    # 38 in A, 2 in B → a meaningful fraction of resamples will contain no B.
+    groups = pd.Series(["A"] * 38 + ["B"] * 2)
+    y_pred = np.array([0] * 19 + [1] * 19 + [1, 0])
+
+    result = bootstrap_confidence_interval(
+        demographic_parity_wrapper, y_pred, y_pred, groups,
+        n_iterations=1000, random_state=1,
+    )
+
+    # did not crash, and produced a usable CI from the surviving iterations
+    assert result.n_valid_iterations > 0
+    assert np.isfinite(result.ci_lower) and np.isfinite(result.ci_upper)
+
+    # skips tracked and reconciled
+    assert result.n_skipped_single_group > 0
+    assert result.skip_breakdown["single_group"] == result.n_skipped_single_group
+    assert (
+        result.n_valid_iterations
+        + sum(result.skip_breakdown.values())
+        == result.n_iterations
+    )
+
+    # the flag fired because the skipped fraction is well over 5%
+    assert result.reliability_warning is not None
+    assert "skipped" in result.reliability_warning
