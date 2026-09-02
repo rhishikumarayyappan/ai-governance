@@ -332,6 +332,29 @@ the standard fix.
 - `_FP_TOLERANCE = 1e-12` — floating-point slack in the permutation test's
   "as large or larger" comparison. Pure numerical hygiene. Not configurable.
 
+### #18 — `BASE_RATE_DIFFERENCE_THRESHOLD = 0.05` — impossibility-theorem trigger
+
+In `detect_metric_tensions` (Component 2.4), if the largest gap between any two
+groups' base rates (positive rate in `y_true`) exceeds 0.05, base rates are
+treated as "differing significantly" and known metric tensions (demographic
+parity vs predictive parity, etc.) are reported as *mathematically expected*
+rather than as a fault. Below 0.05, a disagreement between fairness metrics is
+flagged as `unexplained_disagreement = True` — a genuine finding, not a
+mathematical artefact.
+
+**Source:** engineering judgment, this build (2026-09-02), following the
+threshold named in BUILD_PLAN Component 2.4. No external standard sets the point
+at which base-rate differences make the impossibility theorem "bite" — the
+theorem applies at *any* non-zero difference; 0.05 is a pragmatic cutoff below
+which the effect is treated as negligible. Stated as such.
+
+**Configurable:** no — module constant today.
+
+**What changing it means:** a lower value (say 0.02) treats more metric
+disagreements as mathematically excused, fewer as genuine findings — more
+lenient. A higher value (say 0.10) does the reverse — more disagreements are
+surfaced as real problems needing investigation.
+
 ---
 
 ## Structural findings from this audit
@@ -411,3 +434,4 @@ results.
 | Date | Change | By |
 |---|---|---|
 | 2026-09-02 | Initial version. All 17 thresholds/constants documented from source. Gaps 9.11 and 9.12 raised. | Claude (Sonnet 5) + Rhishikumar |
+| 2026-09-02 | Added #18 (`BASE_RATE_DIFFERENCE_THRESHOLD = 0.05`) with Component 2.4 (metric tension detection). `_PASS_BAND_FRACTION` is now a **named** constant in `statistics.py` (partial progress on 9.11's code-clarity fix; `bias.py` still uses the inline `0.7`). | Claude (Sonnet 5) + Rhishikumar |

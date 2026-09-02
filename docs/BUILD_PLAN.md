@@ -371,17 +371,39 @@ Thresholds become fully configurable per AI system, stored on the system record,
 
 ## Component 2.3 — Simpson's Paradox Detection
 
-File: added to `governance/testing/statistics.py`
+File: `governance/testing/statistics.py` as `detect_simpsons_paradox(...)`
+(implemented 2026-09-02).
 
-After computing an aggregate metric, automatically stratify by every other categorical column with fewer than 10 unique values, recompute the metric within each stratum, and flag when:
-- The aggregate shows no bias but any stratum shows bias above threshold
-- The aggregate direction reverses in any stratum
+After computing an aggregate metric, stratify by another categorical column, recompute the metric within each stratum, and flag when:
+- The aggregate shows no bias but any stratum shows bias above threshold (`"masked_bias"`)
+- The aggregate direction reverses in any stratum (`"reversal"` — demographic parity only; see below)
 
-Output a warning appended to the result detail: *"Aggregate demographic parity is 0.03 (pass), but within the 25–34 age stratum it is 0.19 (fail). Aggregate result may be masking subgroup bias."*
+Output a plain-language `explanation`, e.g. *"The aggregate demographic parity difference is 0.03 (pass), but within the '25-34' stratum (412 samples) it is 0.19 (fail). The aggregate result may be masking bias specific to this subgroup."*
+
+> **Note (2026-09-02):** the function is the **per-column primitive** — it takes
+> one `stratify_by` Series per call. The "automatically stratify by every
+> categorical column with < 10 unique values" behaviour is an engine-level loop
+> that calls this primitive once per candidate column; it lands with the
+> `bias.py` / `engine.py` wiring sub-step, not here. Strata below
+> `min_stratum_size` (default 30) are shown with `excluded=True` but cannot
+> trigger `paradox_detected`. `"reversal"` needs a signed "which group is
+> favoured" quantity, which is only well defined for demographic parity on two
+> groups — with a custom `metric_fn` reversal is not evaluated and the
+> explanation says so.
 
 ## Component 2.4 — Metric Tension Detection
 
-File: `governance/compliance/tensions.py`
+File: **`governance/testing/statistics.py`** as `detect_metric_tensions(...)`
+(implemented 2026-09-02).
+
+> **Note (2026-09-02):** BUILD_PLAN originally filed this under
+> `governance/compliance/tensions.py`. It was built in `statistics.py` instead
+> — not because that home was wrong long-term, but because the compliance module
+> does not exist yet and will not until Phase 5. This function is expected to
+> **move to `governance/compliance/tensions.py` when Phase 5 builds the
+> compliance module** — a forward-looking note, not a current action. It
+> duck-types the `BiasTestResult` objects (reads `.metric_name` / `.status`) and
+> does not import from `bias.py`, so the move is a relocation, not a rewrite.
 
 Implement the impossibility theorem awareness. When base rates differ between groups, demographic parity and predictive parity are mathematically incompatible. Detect and explain:
 

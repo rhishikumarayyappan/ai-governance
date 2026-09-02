@@ -20,16 +20,53 @@ from governance.testing.statistics import (
     ALPHA,
     METRIC_WRAPPERS,
     BootstrapResult,
+    MetricTensionResult,
+    SimpsonsParadoxResult,
     apply_multiple_comparisons_correction,
     assess_reliability,
     bootstrap_confidence_interval,
     demographic_parity_wrapper,
+    detect_metric_tensions,
+    detect_simpsons_paradox,
     equal_opportunity_wrapper,
     equalized_odds_wrapper,
     individual_fairness_wrapper,
     predictive_parity_wrapper,
     significance_test,
 )
+
+
+class _FakeBiasResult:
+    """Duck-types a BiasTestResult for detect_metric_tensions (which reads only
+    .metric_name / .status / .value and never imports from bias.py)."""
+
+    def __init__(self, metric_name, status, value=0.0):
+        self.metric_name = metric_name
+        self.status = status
+        self.value = value
+
+
+def _five_results(**status_by_metric):
+    """Build 5 fake bias results; any metric not named defaults to 'pass'."""
+    order = (
+        "demographic_parity_difference",
+        "equalized_odds_difference",
+        "equal_opportunity_difference",
+        "predictive_parity_difference",
+        "individual_fairness_score",
+    )
+    return [_FakeBiasResult(m, status_by_metric.get(m, "pass")) for m in order]
+
+
+def _labelled(group_pos_counts):
+    """group_pos_counts: list of (group, stratum, n_positive, n_total).
+    Returns (y_pred, sensitive_features, stratify_by) as aligned arrays."""
+    yp, sf, sb = [], [], []
+    for group, stratum, n_pos, n_tot in group_pos_counts:
+        yp.extend([1] * n_pos + [0] * (n_tot - n_pos))
+        sf.extend([group] * n_tot)
+        sb.extend([stratum] * n_tot)
+    return np.array(yp), pd.Series(sf), pd.Series(sb)
 
 
 def _labels(pos: int, total: int) -> list[int]:
@@ -516,3 +553,211 @@ def test_multiple_reasons_accumulate():
     assert any("only 12 samples" in r for r in assessment.reasons)
     assert any("confidence interval spans" in r for r in assessment.reasons)
     assert len(assessment.reasons) >= 2
+
+
+# =========================================================================== #
+# Simpson's paradox detection — Phase 2, gaps 1.5 / 9.9
+# =========================================================================== #
+# --------------------------------------------------------------------------- #
+# Test 1 — masked bias: aggregate passes, one stratum fails, same direction
+# --------------------------------------------------------------------------- #
+def test_simpsons_masked_bias_detected():
+    # Stratum X (n=60): A 0.80 vs B 0.30 → gap 0.50, FAIL, A favoured.
+    # Stratum Y (n=600): A 0.50 vs B 0.51 → gap 0.01, pass (tiny, B edge — below
+    #   the 0.10 reversal bar so it does not count as a reversal).
+    # Aggregate: A 0.527 vs B 0.491 → gap ~0.036, PASS.
+    y_pred, sf, sb = _labelled([
+        ("A", "X", 24, 30), ("B", "X", 9, 30),
+        ("A", "Y", 150, 300), ("B", "Y", 153, 300),
+    ])
+    result = detect_simpsons_paradox(y_pred, y_pred, sf, sb)
+
+    assert isinstance(result, SimpsonsParadoxResult)
+    assert result.aggregate_status == "pass"
+    assert result.paradox_detected is True
+    assert result.paradox_type == "masked_bias"
+    x = next(s for s in result.stratum_results if s["stratum_label"] == "X")
+    assert x["status"] == "fail" and x["excluded"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Test 2 — no paradox: aggregate and every stratum agree
+# --------------------------------------------------------------------------- #
+def test_simpsons_no_paradox_on_consistent_data():
+    y_pred, sf, sb = _labelled([
+        ("A", "X", 165, 300), ("B", "X", 150, 300),   # gap 0.05, pass
+        ("A", "Y", 156, 300), ("B", "Y", 150, 300),   # gap 0.02, pass
+    ])
+    result = detect_simpsons_paradox(y_pred, y_pred, sf, sb)
+
+    assert result.paradox_detected is False
+    assert result.paradox_type is None
+    assert "No Simpson's paradox" in result.explanation
+    assert "masking" not in result.explanation and "reverses" not in result.explanation
+
+
+# --------------------------------------------------------------------------- #
+# Test 3 — a below-min stratum is shown but cannot trigger the flag
+# --------------------------------------------------------------------------- #
+def test_simpsons_small_stratum_excluded_not_dropped():
+    # Stratum Z (n=20) would fail hard (A all positive, B all negative) but is
+    # below min_stratum_size=30, so it must not trigger paradox_detected.
+    y_pred, sf, sb = _labelled([
+        ("A", "X", 150, 300), ("B", "X", 150, 300),   # consistent, pass
+        ("A", "Z", 10, 10), ("B", "Z", 0, 10),        # gap 1.0 but n=20
+    ])
+    result = detect_simpsons_paradox(y_pred, y_pred, sf, sb)
+
+    z = next(s for s in result.stratum_results if s["stratum_label"] == "Z")
+    assert z["excluded"] is True
+    assert z["metric_value"] is not None          # still computed, for transparency
+    assert z["metric_value"] > 0.10               # it WOULD have failed
+    assert result.paradox_detected is False       # ...but it cannot trigger
+
+
+# --------------------------------------------------------------------------- #
+# Test 4 — genuine sign reversal (and reversal skipped for a custom metric_fn)
+# --------------------------------------------------------------------------- #
+def test_simpsons_sign_reversal_detected():
+    # Aggregate favours A; stratum Y favours B; both numerically fail.
+    y_pred, sf, sb = _labelled([
+        ("A", "X", 135, 150), ("B", "X", 75, 150),    # A 0.90 vs B 0.50
+        ("A", "Y", 15, 50), ("B", "Y", 35, 50),       # A 0.30 vs B 0.70
+    ])
+    result = detect_simpsons_paradox(y_pred, y_pred, sf, sb)
+    assert result.paradox_type == "reversal"
+    assert "reverses" in result.explanation
+
+    # Same data, custom metric_fn → reversal must NOT be evaluated.
+    custom = detect_simpsons_paradox(
+        y_pred, y_pred, sf, sb, metric_fn=equalized_odds_wrapper
+    )
+    assert custom.paradox_type != "reversal"
+    assert "not evaluated for the supplied custom metric" in custom.explanation
+
+
+# --------------------------------------------------------------------------- #
+# Test 5 — explanation is alarming only when a paradox is real
+# --------------------------------------------------------------------------- #
+def test_simpsons_explanation_tone():
+    masked = _labelled([
+        ("A", "X", 24, 30), ("B", "X", 9, 30),
+        ("A", "Y", 150, 300), ("B", "Y", 153, 300),
+    ])
+    r_paradox = detect_simpsons_paradox(masked[0], masked[0], masked[1], masked[2])
+    assert r_paradox.paradox_detected is True
+    assert len(r_paradox.explanation) > 40
+    assert "masking bias" in r_paradox.explanation
+
+    clean = _labelled([
+        ("A", "X", 156, 300), ("B", "X", 150, 300),
+        ("A", "Y", 153, 300), ("B", "Y", 150, 300),
+    ])
+    r_clean = detect_simpsons_paradox(clean[0], clean[0], clean[1], clean[2])
+    assert r_clean.paradox_detected is False
+    assert "No Simpson's paradox" in r_clean.explanation
+
+
+# =========================================================================== #
+# Metric tension detection — Phase 2, gap 1.9
+# =========================================================================== #
+def _base_rate_data(rate_a, rate_b, n=400):
+    """y_true with group A at positive rate rate_a, B at rate_b."""
+    a_pos = round(rate_a * n)
+    b_pos = round(rate_b * n)
+    y_true = np.array([1] * a_pos + [0] * (n - a_pos) + [1] * b_pos + [0] * (n - b_pos))
+    sf = pd.Series(["A"] * n + ["B"] * n)
+    return y_true, sf
+
+
+# --------------------------------------------------------------------------- #
+# Test 1 — base rates differ + DP fails while PP passes → tension detected
+# --------------------------------------------------------------------------- #
+def test_tension_detected_when_base_rates_differ():
+    y_true, sf = _base_rate_data(0.70, 0.30)
+    results = _five_results(
+        demographic_parity_difference="fail",
+        predictive_parity_difference="pass",
+    )
+    out = detect_metric_tensions(y_true, sf, results)
+
+    assert isinstance(out, MetricTensionResult)
+    assert out.base_rates_differ_significantly is True
+    assert len(out.tensions) == 1
+    assert out.tensions[0]["pattern"] == "demographic_parity_fails_predictive_parity_passes"
+    assert "base-rate" in out.tensions[0]["explanation"] or "base rate" in out.tensions[0]["explanation"]
+    assert out.unexplained_disagreement is False
+
+
+# --------------------------------------------------------------------------- #
+# Test 2 — same metric pattern, similar base rates → no tension, flagged genuine
+# --------------------------------------------------------------------------- #
+def test_no_tension_when_base_rates_similar():
+    y_true, sf = _base_rate_data(0.50, 0.50)
+    results = _five_results(
+        demographic_parity_difference="fail",
+        predictive_parity_difference="pass",
+    )
+    out = detect_metric_tensions(y_true, sf, results)
+
+    assert out.base_rates_differ_significantly is False
+    assert out.tensions == []                       # not manufactured
+    assert out.unexplained_disagreement is True     # the boolean downstream branches on
+    assert "genuine finding" in out.fairness_definition_note
+
+
+# --------------------------------------------------------------------------- #
+# Test 3 — all metrics agree → no tensions, no unexplained disagreement
+# --------------------------------------------------------------------------- #
+def test_no_tension_when_all_metrics_agree():
+    y_true, sf = _base_rate_data(0.70, 0.30)         # base rates differ...
+    all_pass = detect_metric_tensions(y_true, sf, _five_results())
+    assert all_pass.tensions == []
+    assert all_pass.unexplained_disagreement is False
+
+    all_fail = detect_metric_tensions(
+        y_true, sf,
+        _five_results(
+            demographic_parity_difference="fail",
+            equalized_odds_difference="fail",
+            equal_opportunity_difference="fail",
+            predictive_parity_difference="fail",
+            individual_fairness_score="fail",
+        ),
+    )
+    assert all_fail.tensions == []
+    assert all_fail.unexplained_disagreement is False
+
+
+# --------------------------------------------------------------------------- #
+# Test 4 — base_rates reflects the real positive rate per group
+# --------------------------------------------------------------------------- #
+def test_base_rates_are_computed_correctly():
+    # A: 30 positive of 50 → 0.6.  B: 10 positive of 50 → 0.2.
+    y_true = np.array([1] * 30 + [0] * 20 + [1] * 10 + [0] * 40)
+    sf = pd.Series(["A"] * 50 + ["B"] * 50)
+    out = detect_metric_tensions(y_true, sf, _five_results())
+
+    assert out.base_rates == {"A": 0.6, "B": 0.2}
+    assert out.base_rate_difference == pytest.approx(0.4)
+
+
+# --------------------------------------------------------------------------- #
+# Test 5 — fairness_definition_note names the passing and failing metrics
+# --------------------------------------------------------------------------- #
+def test_fairness_definition_note_names_metrics():
+    y_true, sf = _base_rate_data(0.70, 0.30)
+    results = _five_results(
+        demographic_parity_difference="pass",
+        equal_opportunity_difference="pass",
+        equalized_odds_difference="fail",
+        predictive_parity_difference="fail",
+        individual_fairness_score="fail",
+    )
+    note = detect_metric_tensions(y_true, sf, results).fairness_definition_note
+
+    satisfies, _, rest = note.partition("It does not satisfy:")
+    assert "demographic_parity_difference" in satisfies
+    assert "equal_opportunity_difference" in satisfies
+    assert "predictive_parity_difference" in rest
+    assert "GAP_CHECKLIST 9.12" in note        # the individual_fairness_score caveat

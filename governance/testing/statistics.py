@@ -76,6 +76,10 @@ __all__ = [
     "ReliabilityAssessment",
     "assess_reliability",
     "CORRECTION_METHODS",
+    "SimpsonsParadoxResult",
+    "detect_simpsons_paradox",
+    "MetricTensionResult",
+    "detect_metric_tensions",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -1087,4 +1091,445 @@ def assess_reliability(
         tier=tier,
         reasons=reasons,
         blocks_verdict=(tier == "insufficient_data"),
+    )
+
+
+# =========================================================================== #
+# Simpson's paradox detection (Phase 2 — gaps 1.5, 9.9)
+# =========================================================================== #
+#
+# An aggregate fairness metric can look fine while every meaningful subgroup
+# beneath it is biased — or the reverse. This detects both the "masked bias"
+# case (aggregate passes, a stratum fails) and the "reversal" case (which group
+# is favoured flips between the aggregate and a stratum).
+
+# Mirrors the (currently unnamed) 0.7 multiplier in bias.BiasTestSuite._get_status
+# — the real pass boundary for a 0.10 threshold is 0.07. See GAP_CHECKLIST 9.11.
+_PASS_BAND_FRACTION = 0.7
+
+
+@dataclass
+class SimpsonsParadoxResult:
+    """Outcome of stratifying one fairness metric and checking for a paradox.
+
+    Attributes
+    ----------
+    aggregate_value : float
+        The metric on the full, unstratified data.
+    aggregate_status : str
+        ``"pass"`` / ``"warn"`` / ``"fail"`` from the gap-metric band logic
+        (assumes a lower-is-better gap metric — see the function docstring).
+    stratum_results : list[dict]
+        One dict per stratum: ``stratum_label``, ``n_samples``, ``metric_value``
+        (``None`` if it could not be computed), ``status`` (``None`` likewise),
+        ``excluded`` (True when ``n_samples < min_stratum_size`` — such strata
+        are shown but cannot trigger ``paradox_detected``).
+    paradox_detected : bool
+    paradox_type : str | None
+        ``"masked_bias"`` — aggregate passes but a non-excluded stratum fails.
+        ``"reversal"`` — the favoured group flips between aggregate and a
+        non-excluded stratum (demographic parity only; see below). Takes
+        precedence over ``"masked_bias"`` when both apply.
+        ``None`` — no paradox.
+    explanation : str
+        Plain-language, written for a compliance officer.
+    """
+
+    aggregate_value: float
+    aggregate_status: str
+    stratum_results: list[dict]
+    paradox_detected: bool
+    paradox_type: str | None
+    explanation: str
+
+
+def _gap_metric_status(value: float, threshold: float) -> str:
+    """bias.BiasTestSuite._get_status for a lower-is-better gap metric,
+    reimplemented here (statistics.py never imports from bias.py)."""
+    if value <= threshold * _PASS_BAND_FRACTION:
+        return "pass"
+    if value <= threshold:
+        return "warn"
+    return "fail"
+
+
+def _signed_demographic_parity(y_pred, sensitive_features):
+    """``P(pred=1 | first group) - P(pred=1 | second group)`` in first-appearance
+    order. Returns ``None`` unless there are exactly two groups (the sign — which
+    group is favoured — is undefined otherwise)."""
+    sf = np.asarray(sensitive_features)
+    yp = np.asarray(y_pred)
+    groups = list(pd.unique(pd.Series(sf)))
+    if len(groups) != 2:
+        return None, None
+    r0 = float(np.mean(yp[sf == groups[0]] == POSITIVE_LABEL)) if np.any(sf == groups[0]) else 0.0
+    r1 = float(np.mean(yp[sf == groups[1]] == POSITIVE_LABEL)) if np.any(sf == groups[1]) else 0.0
+    return r0 - r1, (str(groups[0]), str(groups[1]))
+
+
+def detect_simpsons_paradox(
+    y_true,
+    y_pred,
+    sensitive_features,
+    stratify_by,
+    metric_fn: "Callable | None" = None,
+    min_stratum_size: int = 30,
+    threshold: float = 0.10,
+) -> SimpsonsParadoxResult:
+    """Stratify a fairness metric by ``stratify_by`` and check whether the
+    aggregate result is misleading about the subgroups beneath it.
+
+    ``metric_fn`` defaults to :func:`demographic_parity_wrapper`. The
+    pass/warn/fail banding assumes a **lower-is-better gap metric** (0 = no
+    disparity); passing an inverted metric such as
+    :func:`individual_fairness_wrapper` will produce a wrong ``aggregate_status``
+    — that is a documented precondition, not handled.
+
+    **Reversal detection runs only when ``metric_fn`` is the default**
+    (demographic parity). With a custom ``metric_fn`` the "favoured group" is not
+    well defined for an arbitrary metric, so ``paradox_type`` can only be
+    ``"masked_bias"`` or ``None``, and ``explanation`` says reversal was not
+    evaluated.
+
+    ``stratify_by`` is converted to a positional array and must match
+    ``y_pred`` in length.
+    """
+    is_default = metric_fn is None or metric_fn is demographic_parity_wrapper
+    if metric_fn is None:
+        metric_fn = demographic_parity_wrapper
+
+    yp = np.asarray(y_pred)
+    n = len(yp)
+    yt = None if y_true is None else np.asarray(y_true)
+    sf = np.asarray(sensitive_features)
+    strat = np.asarray(stratify_by)
+    if len(sf) != n or len(strat) != n or (yt is not None and len(yt) != n):
+        raise ValueError(
+            "y_true, y_pred, sensitive_features and stratify_by must all be the "
+            "same length"
+        )
+
+    metric_label = (
+        "demographic parity difference"
+        if is_default
+        else getattr(metric_fn, "__name__", "the supplied metric")
+    )
+
+    aggregate_value = float(metric_fn(yt, yp, sf))
+    aggregate_status = _gap_metric_status(aggregate_value, threshold)
+    agg_signed, agg_group_order = (
+        _signed_demographic_parity(yp, sf) if is_default else (None, None)
+    )
+
+    # ---- per-stratum ------------------------------------------------------ #
+    stratum_results: list[dict] = []
+    strata = list(pd.unique(pd.Series(strat)))
+    for s in strata:
+        mask = strat == s
+        n_s = int(mask.sum())
+        excluded = n_s < min_stratum_size
+        value = status = None
+        try:
+            v = float(
+                metric_fn(
+                    None if yt is None else yt[mask], yp[mask], sf[mask]
+                )
+            )
+            if np.isfinite(v):
+                value = round(v, 4)
+                status = _gap_metric_status(value, threshold)
+        except Exception:  # noqa: BLE001 - a stratum that can't be measured is just None
+            pass
+
+        stratum_signed = None
+        if is_default and agg_signed is not None:
+            stratum_signed, _ = _signed_demographic_parity(yp[mask], sf[mask])
+
+        stratum_results.append(
+            {
+                "stratum_label": str(s),
+                "n_samples": n_s,
+                "metric_value": value,
+                "status": status,
+                "excluded": excluded,
+                "_signed": stratum_signed,  # internal, dropped before return
+            }
+        )
+
+    # ---- paradox logic -------------------------------------------------- #
+    masked_strata = [
+        r for r in stratum_results
+        if not r["excluded"] and r["status"] == "fail"
+    ]
+    masked_bias = aggregate_status == "pass" and len(masked_strata) > 0
+
+    reversal_strata = []
+    if is_default and agg_signed is not None and abs(agg_signed) > 1e-9:
+        for r in stratum_results:
+            sgn = r["_signed"]
+            if (
+                not r["excluded"]
+                and sgn is not None
+                and abs(sgn) > threshold          # stratum shows a real opposite gap
+                and np.sign(sgn) != np.sign(agg_signed)
+            ):
+                reversal_strata.append(r)
+
+    if reversal_strata:
+        paradox_type = "reversal"
+    elif masked_bias:
+        paradox_type = "masked_bias"
+    else:
+        paradox_type = None
+    paradox_detected = paradox_type is not None
+
+    # ---- explanation -------------------------------------------------- #
+    n_excluded = sum(1 for r in stratum_results if r["excluded"])
+    custom_note = (
+        ""
+        if is_default
+        else " Reversal detection is only supported for demographic parity in "
+        "this version; not evaluated for the supplied custom metric."
+    )
+
+    if paradox_type == "reversal":
+        worst = max(reversal_strata, key=lambda r: abs(r["_signed"]))
+        favoured_agg = agg_group_order[0] if agg_signed > 0 else agg_group_order[1]
+        favoured_str = agg_group_order[0] if worst["_signed"] > 0 else agg_group_order[1]
+        extra = (
+            f" ({len(reversal_strata) - 1} other stratum/strata also reverse.)"
+            if len(reversal_strata) > 1 else ""
+        )
+        explanation = (
+            f"Aggregate demographic parity favours '{favoured_agg}' "
+            f"(signed gap {agg_signed:+.4f}), but within the "
+            f"'{worst['stratum_label']}' stratum ({worst['n_samples']} samples) "
+            f"the direction reverses to favour '{favoured_str}' "
+            f"(signed gap {worst['_signed']:+.4f}). A conclusion about which "
+            f"group the model advantages does not hold within this subgroup.{extra}"
+            f"{custom_note}"
+        )
+    elif paradox_type == "masked_bias":
+        worst = max(masked_strata, key=lambda r: r["metric_value"])
+        extra = (
+            f" ({len(masked_strata) - 1} other stratum/strata also fail.)"
+            if len(masked_strata) > 1 else ""
+        )
+        explanation = (
+            f"The aggregate {metric_label} is {round(aggregate_value, 4)} "
+            f"({aggregate_status}), but within the '{worst['stratum_label']}' "
+            f"stratum ({worst['n_samples']} samples) it is "
+            f"{worst['metric_value']} ({worst['status']}). The aggregate result "
+            f"may be masking bias specific to this subgroup.{extra}{custom_note}"
+        )
+    else:
+        explanation = (
+            f"No Simpson's paradox detected. The aggregate {metric_label} "
+            f"({aggregate_status}) is consistent with the stratum-level results "
+            f"across {len(strata)} strata ({n_excluded} excluded for sample "
+            f"size < {min_stratum_size}).{custom_note}"
+        )
+
+    for r in stratum_results:  # drop the internal signed value
+        r.pop("_signed", None)
+
+    return SimpsonsParadoxResult(
+        aggregate_value=round(aggregate_value, 4),
+        aggregate_status=aggregate_status,
+        stratum_results=stratum_results,
+        paradox_detected=paradox_detected,
+        paradox_type=paradox_type,
+        explanation=explanation,
+    )
+
+
+# =========================================================================== #
+# Metric tension detection (Phase 2 — gap 1.9)
+# =========================================================================== #
+#
+# The impossibility theorem of algorithmic fairness (Kleinberg et al. 2016;
+# Chouldechova 2017): when group base rates genuinely differ, demographic parity
+# and predictive parity cannot both hold. A model failing one while passing the
+# other may reflect that mathematical constraint, not discrimination. This
+# function is a downstream *interpreter* of an already-computed BiasTestSuite
+# result — it does not re-run any metric, and it duck-types the result objects
+# (reads .metric_name / .status / .value) rather than importing from bias.py.
+#
+# BUILD_PLAN Component 2.4 files this under governance/compliance/tensions.py.
+# It lives in statistics.py today only because the compliance module does not
+# exist yet; see the note in BUILD_PLAN.md.
+
+BASE_RATE_DIFFERENCE_THRESHOLD = 0.05
+
+_FAIRNESS_DEFINITION_METRICS = (
+    "demographic_parity_difference",
+    "equalized_odds_difference",
+    "equal_opportunity_difference",
+    "predictive_parity_difference",
+)
+
+
+@dataclass
+class MetricTensionResult:
+    """Interpretation of a 5-metric BiasTestSuite result in light of group base
+    rates.
+
+    Attributes
+    ----------
+    base_rates : dict
+        ``{group: positive rate in y_true}``.
+    base_rate_difference : float
+        ``max - min`` of the per-group positive rates.
+    base_rates_differ_significantly : bool
+        ``base_rate_difference > 0.05`` (see THRESHOLDS.md #18).
+    tensions : list[dict]
+        One per detected mathematically-expected conflict — ``metric_a``,
+        ``metric_b``, ``pattern``, ``explanation``. Populated **only** when
+        ``base_rates_differ_significantly`` is True.
+    unexplained_disagreement : bool
+        True when the fairness-definition metrics disagree (at least one passes,
+        at least one fails) **and** ``base_rates_differ_significantly`` is False —
+        i.e. a disagreement with no impossibility-theorem excuse, which should be
+        treated as a genuine finding. Downstream code branches on this boolean
+        rather than parsing ``fairness_definition_note``.
+    fairness_definition_note : str
+        Human-readable: which definitions the model currently satisfies, plus
+        context on base rates / unexplained disagreement.
+    """
+
+    base_rates: dict
+    base_rate_difference: float
+    base_rates_differ_significantly: bool
+    tensions: list[dict]
+    unexplained_disagreement: bool
+    fairness_definition_note: str
+
+
+def detect_metric_tensions(
+    y_true,
+    sensitive_features,
+    bias_results: list,
+) -> MetricTensionResult:
+    """See :class:`MetricTensionResult`. ``bias_results`` is the list returned by
+    ``BiasTestSuite.run()`` (or anything with ``.metric_name`` / ``.status``)."""
+    yt = np.asarray(y_true)
+    observed = set(np.unique(yt).tolist())
+    if not observed <= {0, 1}:
+        raise ValueError(
+            f"y_true must be binary {{0, 1}} to compute base rates; got {sorted(observed)}"
+        )
+    sf = np.asarray(sensitive_features)
+    if len(sf) != len(yt):
+        raise ValueError("y_true and sensitive_features must be the same length")
+
+    groups = [str(g) for g in pd.unique(pd.Series(sf))]
+    base_rates = {
+        g: round(float(np.mean(yt[sf.astype(str) == g] == POSITIVE_LABEL)), 4)
+        for g in groups
+    }
+    rates = list(base_rates.values())
+    base_rate_difference = round(max(rates) - min(rates), 4) if len(rates) >= 2 else 0.0
+    differ = base_rate_difference > BASE_RATE_DIFFERENCE_THRESHOLD
+
+    status = {getattr(r, "metric_name", None): getattr(r, "status", None)
+              for r in bias_results}
+
+    def _passes(name: str) -> bool:
+        return status.get(name) == "pass"
+
+    def _fails(name: str) -> bool:
+        return status.get(name) == "fail"
+
+    # ---- known tension pairs (only meaningful when base rates differ) ---- #
+    tensions: list[dict] = []
+    if differ:
+        if _fails("demographic_parity_difference") and _passes("predictive_parity_difference"):
+            tensions.append({
+                "metric_a": "demographic_parity_difference",
+                "metric_b": "predictive_parity_difference",
+                "pattern": "demographic_parity_fails_predictive_parity_passes",
+                "explanation": (
+                    f"Demographic parity fails but predictive parity passes. With "
+                    f"group base rates differing by {base_rate_difference:.3f}, this "
+                    f"is mathematically expected: a model that is equally precise "
+                    f"across groups cannot also equalise selection rates when the "
+                    f"groups have different underlying positive rates. This may "
+                    f"reflect the genuine base-rate difference rather than model "
+                    f"discrimination."
+                ),
+            })
+        if _passes("demographic_parity_difference") and _fails("predictive_parity_difference"):
+            tensions.append({
+                "metric_a": "demographic_parity_difference",
+                "metric_b": "predictive_parity_difference",
+                "pattern": "demographic_parity_passes_predictive_parity_fails",
+                "explanation": (
+                    f"Demographic parity passes but predictive parity fails. The "
+                    f"model equalises selection rates across groups, but at the cost "
+                    f"of differing precision — among those it flags positive, it is "
+                    f"more often wrong for one group than another. With base rates "
+                    f"differing by {base_rate_difference:.3f}, equalising selection "
+                    f"rates necessarily unbalances precision."
+                ),
+            })
+        if _fails("equalized_odds_difference") and _passes("equal_opportunity_difference"):
+            tensions.append({
+                "metric_a": "equalized_odds_difference",
+                "metric_b": "equal_opportunity_difference",
+                "pattern": "equalized_odds_fails_equal_opportunity_passes",
+                "explanation": (
+                    "Equalized odds fails but equal opportunity passes. Equal "
+                    "opportunity measures only the true-positive-rate gap; equalized "
+                    "odds is the larger of the true-positive-rate and "
+                    "false-positive-rate gaps. Since equal opportunity passes, it is "
+                    "the false-positive-rate gap driving the equalized-odds failure "
+                    "— the model wrongly flags one group as positive more often than "
+                    "the other."
+                ),
+            })
+
+    # ---- disagreement among the fairness-definition metrics ------------- #
+    fd_statuses = [status.get(m) for m in _FAIRNESS_DEFINITION_METRICS]
+    metrics_disagree = ("pass" in fd_statuses) and ("fail" in fd_statuses)
+    unexplained_disagreement = metrics_disagree and not differ
+
+    # ---- fairness definition note ------------------------------------- #
+    passing = [m for m in status if status[m] == "pass"]
+    failing = [m for m in status if status[m] == "fail"]
+    warn = [m for m in status if status[m] == "warn"]
+    parts = []
+    parts.append(
+        f"This result satisfies: {', '.join(passing) if passing else 'none of the 5 metrics'}."
+    )
+    if failing:
+        parts.append(f"It does not satisfy: {', '.join(failing)}.")
+    if warn:
+        parts.append(f"Marginal (warn): {', '.join(warn)}.")
+    if "individual_fairness_score" in status:
+        parts.append(
+            "(individual_fairness_score currently measures overall model accuracy, "
+            "not individual consistency — see GAP_CHECKLIST 9.12.)"
+        )
+    if differ and tensions:
+        parts.append(
+            f"Group base rates differ by {base_rate_difference:.3f}; perfect fairness "
+            f"across all definitions is mathematically unachievable — see the tensions "
+            f"listed above."
+        )
+    elif unexplained_disagreement:
+        parts.append(
+            f"These metrics disagree even though group base rates are similar "
+            f"(difference {base_rate_difference:.3f} ≤ {BASE_RATE_DIFFERENCE_THRESHOLD}). "
+            f"The disagreement is NOT explained by the fairness impossibility theorem "
+            f"and should be treated as a genuine finding, not a mathematical artefact."
+        )
+    fairness_definition_note = " ".join(parts)
+
+    return MetricTensionResult(
+        base_rates=base_rates,
+        base_rate_difference=base_rate_difference,
+        base_rates_differ_significantly=differ,
+        tensions=tensions,
+        unexplained_disagreement=unexplained_disagreement,
+        fairness_definition_note=fairness_definition_note,
     )
