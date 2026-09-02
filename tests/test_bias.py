@@ -13,7 +13,7 @@ _FIXED_ORDER = [
     "equalized_odds_difference",
     "equal_opportunity_difference",
     "predictive_parity_difference",
-    "individual_fairness_score",
+    "overall_accuracy_floor",
 ]
 
 

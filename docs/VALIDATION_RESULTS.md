@@ -47,7 +47,7 @@ a model-quality exercise — the models are deliberately ordinary.
 | equalized_odds_difference | 0.1054 | fail |
 | equal_opportunity_difference | 0.1054 | fail |
 | predictive_parity_difference | 0.0019 | pass |
-| individual_fairness_score | 0.8440 | pass |
+| overall_accuracy_floor | 0.8440 | pass |
 
 ### 2. ProPublica COMPAS — race
 
@@ -69,7 +69,7 @@ a model-quality exercise — the models are deliberately ordinary.
 | equalized_odds_difference | 0.1752 | fail |
 | equal_opportunity_difference | 0.1752 | fail |
 | predictive_parity_difference | 0.1179 | fail |
-| individual_fairness_score | 0.6263 | fail |
+| overall_accuracy_floor | 0.6263 | fail |
 
 ### 3. UCI German Credit — age
 
@@ -86,7 +86,7 @@ a model-quality exercise — the models are deliberately ordinary.
 | equalized_odds_difference | 0.1103 | fail |
 | equal_opportunity_difference | 0.1103 | fail |
 | predictive_parity_difference | 0.1569 | fail |
-| individual_fairness_score | 0.7467 | fail |
+| overall_accuracy_floor | 0.7467 | fail |
 
 ---
 
@@ -108,6 +108,11 @@ a model-quality exercise — the models are deliberately ordinary.
 - **Reproducibility:** fixed `random_state=42` throughout. `fetch_adult` and
   `fetch_openml` cache under `~/scikit_learn_data`; the COMPAS CSV is fetched
   live each run. Re-running reproduces the values above exactly.
+- **Metric 5 renamed 2026-09-02 (gap 9.12):** the tables above originally listed
+  `individual_fairness_score`; it is now `overall_accuracy_floor`, which is what
+  it always computed (`MetricFrame.overall` — the model's overall accuracy). Pure
+  rename — re-running `validate_phase1.py` reproduces 0.8440 / 0.6263 / 0.7467
+  **bit-identically**.
 
 ---
 

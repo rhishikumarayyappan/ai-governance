@@ -37,16 +37,15 @@ and 0 means no measured disparity. The status logic in
 
 | Measured value | Status |
 |---|---|
-| `value ≤ threshold × 0.7`  (i.e. `≤ 0.07` at the default) | **pass** |
+| `value ≤ threshold × _PASS_BAND_FRACTION`  (i.e. `≤ 0.07` at the default) | **pass** |
 | `0.07 < value ≤ threshold`  (i.e. `≤ 0.10`) | **warn** |
 | `value > threshold`  (i.e. `> 0.10`) | **fail** |
 
 **The real pass boundary is 0.07, not 0.10.** The `0.10` in
 `BiasTestSuite.DEFAULT_THRESHOLDS` is only the fail boundary; a warn band sits
-between 0.07 and 0.10. See threshold #6 below — this multiplier was undocumented
-in the code until this file was written (tracked as gap **9.11**).
+between 0.07 and 0.10. See threshold #6 below (`_PASS_BAND_FRACTION`, gap 9.11).
 
-For `individual_fairness_score` the logic is **inverted** — it is a floor, higher
+For `overall_accuracy_floor` the logic is **inverted** — it is a floor, higher
 is better, and there is no warn band: `pass` if `value ≥ 0.80`, else `fail`.
 
 ---
@@ -105,17 +104,26 @@ the reverse — fewer false alarms, more real disparities passed as acceptable.
 
 ---
 
-### #5 — `individual_fairness_score` — default `0.80` (inverted floor)
+### #5 — `overall_accuracy_floor` — default `0.80` (inverted floor)
+
+> **Renamed from `individual_fairness_score` on 2026-09-02 (gap 9.12).** The old
+> name implied a consistency property the metric does not have. The metric,
+> value and threshold are **unchanged** — this was a pure rename; Phase 1
+> validation numbers are bit-identical (see `docs/VALIDATION_RESULTS.md`).
 
 **Value:** `0.80`. Passes if `value ≥ 0.80`, fails otherwise. No warn band.
+
+**What it measures:** `MetricFrame(metrics=accuracy_score, ...).overall` — the
+model's **overall predictive accuracy over the whole test set**, checked against
+a floor. It is *not* a fairness metric — it does not compare groups (the
+`sensitive_features` argument only feeds an informational, unused `by_group`
+breakdown in the result detail). A genuine individual-fairness consistency
+metric ("do similar individuals receive similar predictions") is tracked
+separately as gap **9.13**, assigned to Phase 4.
 
 **Source / reasoning — there is no external source. This is an internal
 engineering default.**
 
-- The academic concept of *individual fairness* (Dwork et al., *Fairness Through
-  Awareness*, 2012) is the principle that **similar individuals should receive
-  similar predictions** — a consistency property. It prescribes no numeric
-  threshold.
 - There is no regulation or widely-accepted standard that sets a minimum model
   accuracy of 80% (or any figure). Acceptable accuracy is entirely
   task-dependent — an 80%-accurate model can be worthless under class imbalance,
@@ -123,42 +131,27 @@ engineering default.**
 - The most likely origin of `0.80` is numerical coincidence with the four-fifths
   (80%) rule. If so, that is a category error: the four-fifths rule is about the
   *ratio of selection rates between groups*, not a model's absolute accuracy.
+- The academic concept of *individual fairness* (Dwork et al., *Fairness Through
+  Awareness*, 2012) — the origin of the old name — prescribes no numeric
+  threshold and is not what this metric computes.
 
-**Known limitation — the metric does not measure what its name claims.**
-
-As implemented in `bias.py` (`_individual_fairness_score`), this metric computes
-`MetricFrame(metrics=accuracy_score, ...).overall` — i.e. **the model's overall
-predictive accuracy over the whole test set**. It does not measure individual
-consistency (whether similar people get similar predictions), and it does not
-even compare groups — the `sensitive_features` argument only affects an unused
-`by_group` breakdown stored in the result detail.
-
-A model could treat similar individuals within a group wildly inconsistently and
-still score well here, as long as overall accuracy is high.
-
-This is a **correctness gap in a shipped metric**, tracked as gap **9.12**. It is
-not fixed by this document. Until it is corrected, any compliance report that
-uses the metric name `individual_fairness_score` may mislead a reader about what
-was actually tested. The fix (rename to something accurate, or build a genuine
-individual-fairness consistency metric) is a design decision requiring the
-owner's input and its own scoped session — see gap 9.12.
-
-**Who / when:** default set during Phase 1 Week 2; limitation identified
-2026-09-02 during this audit.
+**Who / when:** default set during Phase 1 Week 2; renamed 2026-09-02.
 
 **Configurable:** same as #1–#4 — `__init__` override only, no per-system
 persistence yet.
 
 **What changing it means:** raising it (say 0.90) rejects more models on
-accuracy grounds; lowering it (say 0.70) passes more. Neither makes the metric
-measure individual fairness.
+accuracy grounds; lowering it (say 0.70) passes more. It remains an
+accuracy floor either way, not a fairness measure.
 
 ---
 
-### #6 — The `0.7` pass/warn band-splitter — undocumented until now
+### #6 — `_PASS_BAND_FRACTION = 0.7` — pass/warn band-splitter
 
-**Value:** `0.7`, hard-coded in `BiasTestSuite._get_status()` as
-`if value <= threshold * 0.7: return "pass"`.
+**Value:** `0.7`. In `BiasTestSuite._get_status()`, a gap metric passes when
+`value <= threshold * self._PASS_BAND_FRACTION` and warns between there and
+`threshold`. The same constant is `_PASS_BAND_FRACTION` in `statistics.py`
+(`detect_simpsons_paradox`).
 
 **Effect:** for the default `0.10` metrics, the actual **pass** boundary is
 `0.10 × 0.7 = 0.07`. Values between 0.07 and 0.10 are **warn**. Anyone reading
@@ -168,19 +161,16 @@ it is not; 0.10 is the fail line and 0.07 is the pass line.
 **Source / reasoning:** none. It is an internal decision to carve a
 "close to the limit" warn band at 70% of the threshold. No external basis, no
 regulatory basis, no statistical basis. It is a reasonable idea (a buffer zone
-before outright failure) implemented as a magic number.
+before outright failure).
 
-**Who / when:** introduced during Phase 1 Week 2; discovered and documented
-2026-09-02 during this audit.
+**Who / when:** introduced during Phase 1 Week 2 as an inline `0.7`; discovered
+and documented 2026-09-02 (gap **9.11**); extracted to the named class constant
+`_PASS_BAND_FRACTION` with an explanatory comment on 2026-09-02 — **gap 9.11
+closed.**
 
-**Configurable:** **no** — unlike the threshold values, `0.7` cannot be
-overridden. It is not in `DEFAULT_THRESHOLDS`; it is inline in the status
-function.
-
-**Status:** documented here (gap **9.11**). The code-level fix — naming the
-constant (`PASS_BAND_FRACTION = 0.7`) and adding a docstring to `_get_status()`
-so the warn band is legible without reading this file — is a small follow-up,
-noted in the gap tracker, not urgent, and must not be forgotten.
+**Configurable:** **no** — it is not in `DEFAULT_THRESHOLDS`; it is a class-level
+constant. Changing it changes the width of the warn band for all four gap
+metrics at once.
 
 ---
 
@@ -362,37 +352,33 @@ surfaced as real problems needing investigation.
 Two issues surfaced while compiling this file. Both are tracked in
 `docs/GAP_CHECKLIST.md`; recorded here so the reasoning is not lost.
 
-### Gap 9.11 — the `0.7` band-splitter was undocumented in code
+### Gap 9.11 — the `0.7` band-splitter was undocumented in code — **CLOSED**
 
 The real pass boundary for the four gap metrics is **0.07**, not the `0.10` in
 `DEFAULT_THRESHOLDS`. Until this file, that fact existed nowhere in writing.
-`_get_status()` is unreadable without already knowing it.
 
-- **Fixed by:** this document (Part 1, #6).
-- **Not yet fixed:** the code itself. Follow-up — name the constant
-  (`PASS_BAND_FRACTION = 0.7`) and docstring `_get_status()` so the warn band is
-  legible from the source. Small, not urgent, tracked.
-- **Status:** partially closed (documented; code clarity pending).
+- **Documented:** Part 1, #6 (2026-09-02).
+- **Code fixed:** the inline `0.7` in `BiasTestSuite._get_status()` was extracted
+  to the named class constant `_PASS_BAND_FRACTION` with an explanatory comment
+  (2026-09-02, same commit as the 9.12 rename). `statistics.py` already used
+  `_PASS_BAND_FRACTION`.
+- **Status:** ✅ closed.
 
-### Gap 9.12 — `individual_fairness_score` is mislabelled
+### Gap 9.12 — `individual_fairness_score` was mislabelled — **CLOSED (rename)**
 
 The metric measures **overall model accuracy** (`MetricFrame.overall`), not
 individual consistency. Individual fairness in the literature means "similar
-individuals receive similar predictions" — a consistency property. What is
-implemented is a performance property that doesn't even look at per-group
-results.
+individuals receive similar predictions" — a consistency property.
 
-- **Impact:** every compliance report using this metric name may mislead a
-  reader about what was tested.
-- **Fix options (owner decision required, not housekeeping):**
-  (a) rename to something accurate — e.g. `overall_accuracy_floor` /
-  `min_group_accuracy_floor` — and update the compliance mapper and reports to
-  match; or
-  (b) build a genuine individual-fairness metric (e.g. a consistency score using
-  nearest-neighbour comparison across the protected attribute) to sit under the
-  current name.
-- **Status:** open. Not addressed by this session. Requires its own scoped
-  `bias.py` session with the owner's input on which fix.
+- **Fix (owner decision, 2026-09-02): rename only.** `individual_fairness_score`
+  → `overall_accuracy_floor` across `bias.py`, `statistics.py`, test files,
+  `THRESHOLDS.md` #5, `VALIDATION_RESULTS.md`, and the `detect_metric_tensions`
+  note. Pure rename — metric, value, threshold and Phase 1 validation numbers
+  unchanged.
+- **Status:** ✅ closed. Building a *genuine* consistency metric is a separate
+  piece of work — gap **9.13**, assigned to Phase 4 (X-threading through
+  `BiasTestSuite.run()`, nearest-neighbour comparison, benchmark validation,
+  ~1–2 days).
 
 ---
 
@@ -409,7 +395,7 @@ results.
   threshold, when, or why. Nothing stores a per-AI-system threshold set. A
   threshold override lives only for the lifetime of the `BiasTestSuite` object
   that received it.
-- The `0.7` band-splitter (#6) cannot be overridden at all.
+- `_PASS_BAND_FRACTION` (#6) is a class constant, not overridable per instance.
 - The statistical constants in `statistics.py` (#8, #9, #11, #12, #13, #16, #17)
   are module-level and not configurable per call; #7, #10, #14, #15 are function
   arguments with defaults.
@@ -434,4 +420,5 @@ results.
 | Date | Change | By |
 |---|---|---|
 | 2026-09-02 | Initial version. All 17 thresholds/constants documented from source. Gaps 9.11 and 9.12 raised. | Claude (Sonnet 5) + Rhishikumar |
-| 2026-09-02 | Added #18 (`BASE_RATE_DIFFERENCE_THRESHOLD = 0.05`) with Component 2.4 (metric tension detection). `_PASS_BAND_FRACTION` is now a **named** constant in `statistics.py` (partial progress on 9.11's code-clarity fix; `bias.py` still uses the inline `0.7`). | Claude (Sonnet 5) + Rhishikumar |
+| 2026-09-02 | Added #18 (`BASE_RATE_DIFFERENCE_THRESHOLD = 0.05`) with Component 2.4 (metric tension detection). | Claude (Sonnet 5) + Rhishikumar |
+| 2026-09-02 | **Gap 9.12 rename** — `individual_fairness_score` → `overall_accuracy_floor` throughout (#5 retitled; pure rename, validation numbers bit-identical). **Gap 9.11 closed** — inline `0.7` in `_get_status()` extracted to `_PASS_BAND_FRACTION` class constant (#6 retitled). | Claude (Sonnet 5) + Rhishikumar |

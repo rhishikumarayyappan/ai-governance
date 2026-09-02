@@ -69,7 +69,7 @@ __all__ = [
     "equalized_odds_wrapper",
     "equal_opportunity_wrapper",
     "predictive_parity_wrapper",
-    "individual_fairness_wrapper",
+    "overall_accuracy_floor_wrapper",
     "METRIC_WRAPPERS",
     "CorrectionResult",
     "apply_multiple_comparisons_correction",
@@ -804,10 +804,12 @@ def predictive_parity_wrapper(y_true, y_pred, sensitive_features) -> float:
     return float(max(precisions) - min(precisions)) if precisions else 0.0
 
 
-def individual_fairness_wrapper(y_true, y_pred, sensitive_features) -> float:
-    """Overall accuracy (0-1). NOT a difference and NOT absolute-valued —
-    matches bias.py's inverted-threshold metric 5 (fail below 0.80)."""
-    yt = _require_y_true(y_true, "individual_fairness_wrapper")
+def overall_accuracy_floor_wrapper(y_true, y_pred, sensitive_features) -> float:
+    """The model's overall accuracy (0-1). NOT a difference and NOT
+    absolute-valued — matches bias.py's inverted-threshold metric 5
+    (`overall_accuracy_floor`, fail below 0.80). Named
+    `individual_fairness_wrapper` until 2026-09-02 (gap 9.12)."""
+    yt = _require_y_true(y_true, "overall_accuracy_floor_wrapper")
     frame = MetricFrame(
         metrics=accuracy_score,
         y_true=yt,
@@ -822,7 +824,7 @@ METRIC_WRAPPERS: dict[str, MetricFn] = {
     "equalized_odds_difference": equalized_odds_wrapper,
     "equal_opportunity_difference": equal_opportunity_wrapper,
     "predictive_parity_difference": predictive_parity_wrapper,
-    "individual_fairness_score": individual_fairness_wrapper,
+    "overall_accuracy_floor": overall_accuracy_floor_wrapper,
 }
 
 
@@ -1182,8 +1184,8 @@ def detect_simpsons_paradox(
     ``metric_fn`` defaults to :func:`demographic_parity_wrapper`. The
     pass/warn/fail banding assumes a **lower-is-better gap metric** (0 = no
     disparity); passing an inverted metric such as
-    :func:`individual_fairness_wrapper` will produce a wrong ``aggregate_status``
-    — that is a documented precondition, not handled.
+    :func:`overall_accuracy_floor_wrapper` will produce a wrong
+    ``aggregate_status`` — that is a documented precondition, not handled.
 
     **Reversal detection runs only when ``metric_fn`` is the default**
     (demographic parity). With a custom ``metric_fn`` the "favoured group" is not
@@ -1505,10 +1507,11 @@ def detect_metric_tensions(
         parts.append(f"It does not satisfy: {', '.join(failing)}.")
     if warn:
         parts.append(f"Marginal (warn): {', '.join(warn)}.")
-    if "individual_fairness_score" in status:
+    if "overall_accuracy_floor" in status:
         parts.append(
-            "(individual_fairness_score currently measures overall model accuracy, "
-            "not individual consistency — see GAP_CHECKLIST 9.12.)"
+            "(overall_accuracy_floor is a floor on the model's overall accuracy, "
+            "not a measure of individual fairness — a genuine consistency metric "
+            "is GAP_CHECKLIST 9.13, Phase 4.)"
         )
     if differ and tensions:
         parts.append(

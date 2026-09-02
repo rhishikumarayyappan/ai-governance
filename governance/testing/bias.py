@@ -57,7 +57,17 @@ class BiasTestResult:
 
 
 class BiasTestSuite:
-    """Runs the 5 fairness metrics against a set of predictions."""
+    """Runs the 5 bias-test metrics against a set of predictions.
+
+    Metrics 1-4 are fairness gap metrics (lower is better); metric 5
+    (`overall_accuracy_floor`) is a floor on the model's overall accuracy.
+    """
+
+    # For a gap metric the pass boundary is `threshold * _PASS_BAND_FRACTION`
+    # (0.07 at the 0.10 default); the band between there and `threshold` is
+    # "warn". This is an internal convention with no external basis — see
+    # THRESHOLDS.md #6 and GAP_CHECKLIST 9.11.
+    _PASS_BAND_FRACTION = 0.7
 
     # Class attribute (not set in __init__) so it can be inspected without
     # instantiating the class.
@@ -66,7 +76,7 @@ class BiasTestSuite:
         "equalized_odds_difference": 0.10,
         "equal_opportunity_difference": 0.10,
         "predictive_parity_difference": 0.10,
-        "individual_fairness_score": 0.80,
+        "overall_accuracy_floor": 0.80,
     }
 
     # The fixed order run() returns results in. Never reorder — other components
@@ -76,7 +86,7 @@ class BiasTestSuite:
         "equalized_odds_difference",
         "equal_opportunity_difference",
         "predictive_parity_difference",
-        "individual_fairness_score",
+        "overall_accuracy_floor",
     )
 
     def __init__(self, thresholds: dict | None = None) -> None:
@@ -91,12 +101,12 @@ class BiasTestSuite:
     def _get_status(self, metric_name: str, value: float) -> str:
         threshold = self.thresholds[metric_name]
 
-        if metric_name == "individual_fairness_score":
+        if metric_name == "overall_accuracy_floor":
             # INVERTED THRESHOLD — fail below, pass above. No warn band.
             return "pass" if value >= threshold else "fail"
 
         # Metrics 1-4: it is a gap, lower is better.
-        if value <= threshold * 0.7:
+        if value <= threshold * self._PASS_BAND_FRACTION:
             return "pass"
         if value <= threshold:
             return "warn"
@@ -124,7 +134,7 @@ class BiasTestSuite:
             self._equalized_odds_difference(y_true, y_pred, sensitive_features, attribute_name),
             self._equal_opportunity_difference(y_true, y_pred, sensitive_features, attribute_name),
             self._predictive_parity_difference(y_true, y_pred, groups, attribute_name),
-            self._individual_fairness_score(y_true, y_pred, sensitive_features, attribute_name),
+            self._overall_accuracy_floor(y_true, y_pred, sensitive_features, attribute_name),
         ]
 
         # Guard the contract: exactly 5, fixed order.
@@ -214,18 +224,23 @@ class BiasTestSuite:
         )
 
     # ------------------------------------------------------------------ #
-    # Metric 5 — Individual Fairness Score (fairlearn MetricFrame)
+    # Metric 5 — Overall Accuracy Floor (fairlearn MetricFrame)
     # INVERTED THRESHOLD — fail below, pass above.
+    #
+    # This is the model's OVERALL predictive accuracy over the whole test set
+    # (MetricFrame.overall) checked against a floor. It is NOT a measure of
+    # individual fairness (whether similar individuals get similar predictions)
+    # — a genuine consistency metric is tracked as GAP_CHECKLIST 9.13 (Phase 4).
+    # It was named `individual_fairness_score` until 2026-09-02 (gap 9.12).
     # ------------------------------------------------------------------ #
-    def _individual_fairness_score(self, y_true, y_pred, sensitive_features, attribute_name):
-        name = "individual_fairness_score"
+    def _overall_accuracy_floor(self, y_true, y_pred, sensitive_features, attribute_name):
+        name = "overall_accuracy_floor"
         frame = MetricFrame(
             metrics=accuracy_score,
             y_true=y_true,
             y_pred=y_pred,
             sensitive_features=sensitive_features,
         )
-        # Individual fairness proxy = overall consistency (accuracy) of the model.
         value = round(float(frame.overall), 4)
         # INVERTED THRESHOLD — fail below, pass above
         status = self._get_status(name, value)
@@ -236,6 +251,8 @@ class BiasTestSuite:
             status=status,
             detail={
                 "attribute_name": attribute_name,
+                # by_group accuracy is recorded for information only — it does NOT
+                # feed the pass/fail decision, which is based solely on frame.overall.
                 "by_group": {
                     str(k): round(float(v), 4) for k, v in frame.by_group.items()
                 },

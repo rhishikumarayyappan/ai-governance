@@ -30,7 +30,7 @@ from governance.testing.statistics import (
     detect_simpsons_paradox,
     equal_opportunity_wrapper,
     equalized_odds_wrapper,
-    individual_fairness_wrapper,
+    overall_accuracy_floor_wrapper,
     predictive_parity_wrapper,
     significance_test,
 )
@@ -53,7 +53,7 @@ def _five_results(**status_by_metric):
         "equalized_odds_difference",
         "equal_opportunity_difference",
         "predictive_parity_difference",
-        "individual_fairness_score",
+        "overall_accuracy_floor",
     )
     return [_FakeBiasResult(m, status_by_metric.get(m, "pass")) for m in order]
 
@@ -722,7 +722,7 @@ def test_no_tension_when_all_metrics_agree():
             equalized_odds_difference="fail",
             equal_opportunity_difference="fail",
             predictive_parity_difference="fail",
-            individual_fairness_score="fail",
+            overall_accuracy_floor="fail",
         ),
     )
     assert all_fail.tensions == []
@@ -752,7 +752,7 @@ def test_fairness_definition_note_names_metrics():
         equal_opportunity_difference="pass",
         equalized_odds_difference="fail",
         predictive_parity_difference="fail",
-        individual_fairness_score="fail",
+        overall_accuracy_floor="fail",
     )
     note = detect_metric_tensions(y_true, sf, results).fairness_definition_note
 
@@ -760,4 +760,4 @@ def test_fairness_definition_note_names_metrics():
     assert "demographic_parity_difference" in satisfies
     assert "equal_opportunity_difference" in satisfies
     assert "predictive_parity_difference" in rest
-    assert "GAP_CHECKLIST 9.12" in note        # the individual_fairness_score caveat
+    assert "GAP_CHECKLIST 9.13" in note        # the overall_accuracy_floor caveat

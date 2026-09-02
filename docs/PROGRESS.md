@@ -12,11 +12,25 @@
 - Last updated: 2026-09-02
 - Next: the wiring sub-step — CI / p-value / corrected threshold / reliability
   flag onto `TestResult` rows; per-system threshold config + audit for the rest
-  of 1.2. First `bias.py` / `engine.py` / model changes this phase. Also pending:
-  owner decision on 9.12 (rename only vs rename-plus-build).
-- **Open discovered gaps:** 9.11 (0.7 band-splitter — `_PASS_BAND_FRACTION` now
-  named in `statistics.py`; `bias.py` still inline), 9.12 (`individual_fairness_score`
-  mislabelled — owner decision + own `bias.py` session).
+  of 1.2. First `engine.py` / `TestResult` model changes this phase.
+- **Discovered gaps:** 9.11 ✅ (`_PASS_BAND_FRACTION` named in `bias.py` +
+  `statistics.py`), 9.12 ✅ (renamed `individual_fairness_score` →
+  `overall_accuracy_floor`), 9.13 ⬜ (genuine consistency metric — Phase 4).
+
+### Session 12 note (2026-09-02) — rename `individual_fairness_score` → `overall_accuracy_floor` (9.12), close 9.11
+
+Pure rename (owner decision: rename only; genuine consistency metric is 9.13,
+Phase 4). Metric 5 now honestly named — it computes `MetricFrame.overall`
+(overall accuracy) against a floor, not an individual-fairness property. Touched
+`bias.py`, `statistics.py` (`overall_accuracy_floor_wrapper`, `METRIC_WRAPPERS`
+key, docstrings, the `detect_metric_tensions` note now points at 9.13),
+`test_bias.py`, `test_statistics.py`, `THRESHOLDS.md` #5/#6, `VALIDATION_RESULTS.md`.
+**Zero behaviour change** — `validate_phase1.py` reproduces 0.8440 / 0.6263 /
+0.7467 bit-identically; 54 tests pass; health 200. Same commit closed 9.11:
+inline `0.7` in `_get_status()` → `_PASS_BAND_FRACTION` class constant (identical
+arithmetic, confirmed by the bit-identical validation and the band-boundary
+test). Added a comment noting the metric's `by_group` detail is informational,
+not part of the verdict.
 
 ### Session 11 note (2026-09-02) — Simpson's paradox + metric tension detection
 
@@ -552,6 +566,10 @@ Component status:
 - [x] Week 3 — Validated against COMPAS (0.1752, in range) + German Credit (0.1149, in range)
 
 ### Phase 2 — Statistical Rigour Layer (v2.0) — IN PROGRESS
+
+> Metric 5 renamed `individual_fairness_score` → `overall_accuracy_floor`
+> (2026-09-02, gap 9.12). Historical session logs below keep the old name — that
+> was accurate at the time.
 
 Component 2.1 — Statistical Testing Module (`governance/testing/statistics.py`):
 - [x] Significance testing — chi-squared, Fisher's exact, z-test, permutation
