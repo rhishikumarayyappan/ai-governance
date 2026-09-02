@@ -1,25 +1,36 @@
 # AI Governance Platform — Progress Log
 
 ## Current Status
-- **Phase 2 — IN PROGRESS.** `statistics.py` computation layer COMPLETE
-  (significance 1.4, bootstrap CIs 1.3, correction 1.1, reliability 1.8).
-  `THRESHOLDS.md` written (1.2 → 🟡 — doc done, per-system config + audit still to build).
+- **Phase 2 — IN PROGRESS.** `statistics.py` computation layer COMPLETE:
+  significance 1.4, bootstrap CIs 1.3, correction 1.1, reliability 1.8,
+  **Simpson's paradox 1.5/9.9, metric tensions 1.9**. `THRESHOLDS.md` written
+  (1.2 → 🟡 — doc done, per-system config + audit still to build).
 - Phase 1 COMPLETE (Weeks 1–2 + Week 3 benchmark validation).
 - Working to **BUILD_PLAN v2.0** (10 phases, 9 gap categories, `docs/GAP_CHECKLIST.md` is the authoritative tracker)
 - Overall health: **Green**
-- **44 tests passing, 0 failures** (~53s — bootstrap loops dominate)
+- **54 tests passing, 0 failures** (~54s — bootstrap loops dominate)
 - Last updated: 2026-09-02
-- Next: **Component 2.3 — Simpson's paradox detection** (gaps 1.5 / 9.9), added
-  to `statistics.py`: after an aggregate metric, stratify by every other
-  categorical column with < 10 unique values, recompute per stratum, flag when
-  the aggregate passes but a stratum fails or the direction reverses. Then
-  **2.4 `governance/compliance/tensions.py`** (gap 1.9, impossibility-theorem
-  awareness). Then the wiring sub-step (CI / p-value / corrected threshold /
-  reliability flag onto `TestResult`; per-system threshold config + audit for
-  the rest of 1.2 — first `bias.py` / `engine.py` / model changes this phase).
-- **Open discovered gaps:** 9.11 (0.7 band-splitter code clarity — small
-  follow-up), 9.12 (`individual_fairness_score` mislabelled — needs an owner
-  decision + its own `bias.py` session).
+- Next: the wiring sub-step — CI / p-value / corrected threshold / reliability
+  flag onto `TestResult` rows; per-system threshold config + audit for the rest
+  of 1.2. First `bias.py` / `engine.py` / model changes this phase. Also pending:
+  owner decision on 9.12 (rename only vs rename-plus-build).
+- **Open discovered gaps:** 9.11 (0.7 band-splitter — `_PASS_BAND_FRACTION` now
+  named in `statistics.py`; `bias.py` still inline), 9.12 (`individual_fairness_score`
+  mislabelled — owner decision + own `bias.py` session).
+
+### Session 11 note (2026-09-02) — Simpson's paradox + metric tension detection
+
+`detect_simpsons_paradox` (gaps 1.5, 9.9) and `detect_metric_tensions` (gap 1.9)
+built in `statistics.py`, 10 new tests (54 total, all green). Reversal detection
+is default-metric-only; `MetricTensionResult` carries a `unexplained_disagreement`
+boolean for downstream code. Verified on real data: Adult Income (stratified by
+age and by education) shows **no false paradox** — the aggregate sex-gap failure
+is consistent with the strata (gap concentrated among degree-holders, 0.43).
+COMPAS base rates confirmed to differ (0.133, matches the literature); no tension
+*pattern* fires because all 5 metrics fail — correct, there's nothing passing to
+be in tension with. BUILD_PLAN 2.3/2.4 updated to as-built (2.4 notes it will
+move to `compliance/tensions.py` in Phase 5). THRESHOLDS.md #18 added. Commit
+`a57abee`.
 
 ---
 
@@ -554,19 +565,20 @@ Component 2.1 — Statistical Testing Module (`governance/testing/statistics.py`
 - [x] Reliability scoring — `assess_reliability`, three-tier,
       "insufficient_data" blocks verdict (rule set revised from BUILD_PLAN draft;
       BUILD_PLAN.md updated to match)
-- [x] `tests/test_statistics.py` — 24 tests (8 significance + 6 bootstrap +
-      5 correction + 5 reliability)
+- [x] `tests/test_statistics.py` — 34 tests (8 significance + 6 bootstrap +
+      5 correction + 5 reliability + 5 Simpson's + 5 tensions)
 - [ ] Wire CI / p-value / corrected threshold / reliability flag onto
       `TestResult` rows (separate sub-step — touches `bias.py`/`engine.py`/models)
 
 Component 2.2 — `THRESHOLDS.md` **written** (gap 1.2 → 🟡). Permutation-p-value
 add-one-smoothing carry-over TODO from Session 7: **done** (#16 in the file).
 Remaining for 1.2: per-system threshold config + audit-log on change.
-Component 2.3 — Simpson's paradox detection (not started).
-Component 2.4 — `governance/compliance/tensions.py` (not started).
+Component 2.3 — Simpson's paradox detection **done** (`detect_simpsons_paradox`).
+Component 2.4 — Metric tension detection **done** (`detect_metric_tensions` in
+`statistics.py`; moves to `compliance/tensions.py` in Phase 5).
 
-Gap tracker: **1.1, 1.3, 1.4, 1.8 ✅ closed.** 1.2 🟡 (doc done). 1.5, 1.9, 9.9
-still open. Discovered: 9.11 🟡, 9.12 ⬜. See `docs/GAP_CHECKLIST.md`.
+Gap tracker: **1.1, 1.3, 1.4, 1.5, 1.8, 1.9, 9.9 ✅ closed.** 1.2 🟡 (doc done).
+Discovered: 9.11 🟡, 9.12 ⬜. See `docs/GAP_CHECKLIST.md`.
 
 ---
 
