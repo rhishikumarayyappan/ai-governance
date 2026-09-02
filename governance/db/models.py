@@ -17,7 +17,7 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, String
+from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from governance.db.database import Base
@@ -103,10 +103,30 @@ class TestResult(Base):
     # demographic_parity_difference / equalized_odds / ...
     metric_name: Mapped[str] = mapped_column(String, nullable=False)
     metric_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # the effective threshold this result was judged against (a run's
+    # per-system override if one exists, else the BiasTestSuite default)
     threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
-    # pass / warn / fail
+    # pass / warn / fail / indeterminate
+    #   "indeterminate" is set by the engine (never by BiasTestSuite) when
+    #   reliability scoring returns tier="insufficient_data" — the data cannot
+    #   support any verdict. It is the ABSENCE of a result, not a soft "warn".
     status: Mapped[str | None] = mapped_column(String, nullable=True)
     detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # ---- Phase 2 statistical layer (all nullable; pre-Phase-2 rows have none) ----
+    confidence_interval_lower: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence_interval_upper: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # p_value / corrected_threshold / correction_method are populated ONLY for
+    # the 4 group-comparison fairness metrics. overall_accuracy_floor leaves
+    # them NULL: shuffling group labels cannot change overall accuracy, so a
+    # permutation p-value for it is structurally meaningless — there is no
+    # group-comparison hypothesis to test significance against.
+    p_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    corrected_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    correction_method: Mapped[str | None] = mapped_column(String, nullable=True)
+    # "reliable" / "unstable" / "insufficient_data"
+    reliability_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    sample_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     run: Mapped["TestRun"] = relationship(back_populates="results")
 
