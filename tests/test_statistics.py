@@ -31,6 +31,7 @@ from governance.testing.statistics import (
     equal_opportunity_wrapper,
     equalized_odds_wrapper,
     overall_accuracy_floor_wrapper,
+    permutation_p_value,
     predictive_parity_wrapper,
     significance_test,
 )
@@ -189,6 +190,69 @@ def test_permutation_test_converges_across_seeds():
 
     # 1,000 iterations should put the two Monte-Carlo estimates within ~0.02.
     assert abs(p_a - p_b) < 0.02
+
+
+# --------------------------------------------------------------------------- #
+# permutation_p_value — the generic per-metric version (Phase 2 wiring sub-step)
+# --------------------------------------------------------------------------- #
+def test_permutation_p_value_matches_significance_test_on_demographic_parity():
+    # Same synthetic data as test_permutation_test_converges_across_seeds.
+    # With metric_fn=demographic_parity_wrapper the generic function must
+    # reproduce significance_test's permutation p-value *bit-for-bit* on the
+    # same seed — proof the shared shuffling logic is consistent before the
+    # function is trusted on the other four metrics (no independent reference).
+    rng = np.random.default_rng(7)
+    a = rng.choice([0, 1], 150, p=[0.4, 0.6])
+    b = rng.choice([0, 1], 150, p=[0.55, 0.45])
+    y_pred = np.concatenate([a, b])
+    sensitive = pd.Series(["A"] * 150 + ["B"] * 150)
+
+    for seed in (1, 999, 42):
+        obs, p_new = permutation_p_value(
+            demographic_parity_wrapper, y_pred, y_pred, sensitive,
+            n_permutations=1000, random_state=seed,
+        )
+        ref = significance_test(
+            y_pred, y_pred, sensitive, method="permutation", random_state=seed
+        )
+        assert p_new == ref.p_value          # exact, not approximate
+        assert obs == pytest.approx(ref.statistic, abs=1e-12)
+
+
+def test_permutation_p_value_all_five_wrappers_and_add_one_floor():
+    rng = np.random.default_rng(11)
+    n = 200
+    groups = pd.Series(["A"] * n + ["B"] * n)
+    y_true = rng.integers(0, 2, 2 * n)
+    flip = rng.random(2 * n) < np.where(groups.to_numpy() == "A", 0.15, 0.35)
+    y_pred = np.where(flip, 1 - y_true, y_true)
+
+    for name, wrapper in METRIC_WRAPPERS.items():
+        obs, p = permutation_p_value(
+            wrapper, y_true, y_pred, groups, n_permutations=300, random_state=5
+        )
+        assert np.isfinite(obs)
+        # add-one smoothing: p can never be 0, and never exceeds 1
+        assert 1 / (300 + 1) <= p <= 1.0
+
+    # A group-agnostic metric (overall accuracy) is structurally unaffected by
+    # shuffling group labels, so its permutation p-value is ~1.0 — correct, and
+    # a signal it does not belong to the fairness-gap correction family.
+    _, p_acc = permutation_p_value(
+        overall_accuracy_floor_wrapper, y_true, y_pred, groups,
+        n_permutations=200, random_state=1,
+    )
+    assert p_acc == pytest.approx(1.0)
+
+
+def test_permutation_p_value_rejects_mismatched_lengths():
+    with pytest.raises(ValueError, match="same length"):
+        permutation_p_value(
+            demographic_parity_wrapper,
+            np.array([0, 1, 0]),
+            np.array([0, 1, 0]),
+            pd.Series(["A", "B"]),
+        )
 
 
 # --------------------------------------------------------------------------- #

@@ -71,6 +71,7 @@ __all__ = [
     "predictive_parity_wrapper",
     "overall_accuracy_floor_wrapper",
     "METRIC_WRAPPERS",
+    "permutation_p_value",
     "CorrectionResult",
     "apply_multiple_comparisons_correction",
     "ReliabilityAssessment",
@@ -826,6 +827,60 @@ METRIC_WRAPPERS: dict[str, MetricFn] = {
     "predictive_parity_difference": predictive_parity_wrapper,
     "overall_accuracy_floor": overall_accuracy_floor_wrapper,
 }
+
+
+def permutation_p_value(
+    metric_fn: MetricFn,
+    y_true,
+    y_pred,
+    sensitive_features,
+    n_permutations: int = DEFAULT_N_PERMUTATIONS,
+    random_state: int | None = None,
+) -> tuple[float, float]:
+    """Assumption-free p-value for **any** fairness metric, via group-label
+    permutation.
+
+    Generalises the internal ``_permutation_p_value`` (which is hardcoded to
+    demographic parity) so the engine can get a p-value for all five
+    ``METRIC_WRAPPERS`` and then correct across them together.
+
+    Method: compute the observed ``metric_fn`` value, then shuffle the group
+    labels ``n_permutations`` times (keeping ``y_true`` and ``y_pred`` aligned to
+    each row — only *which group a row belongs to* is randomised, which is
+    exactly the null "group membership is unrelated to how the model treats
+    you"), recompute the metric each time, and report
+
+        p = (1 + #{shuffled >= observed}) / (1 + n_permutations)
+
+    Add-one smoothing (Phipson & Smyth 2010): p is bounded away from 0, never
+    asserting a gap "could not happen by chance".
+
+    With ``metric_fn = demographic_parity_wrapper`` this produces the same
+    p-value as ``significance_test(..., method="permutation")`` on the same data
+    and seed — verified in the test suite.
+
+    Returns ``(observed_statistic, p_value)``.
+    """
+    sf = np.asarray(sensitive_features)
+    yp = np.asarray(y_pred)
+    yt = None if y_true is None else np.asarray(y_true)
+    if len(sf) != len(yp) or (yt is not None and len(yt) != len(yp)):
+        raise ValueError(
+            "y_true, y_pred and sensitive_features must all be the same length"
+        )
+    if n_permutations < 1:
+        raise ValueError(f"n_permutations must be >= 1, got {n_permutations}")
+
+    observed = float(metric_fn(yt, yp, sf))
+    rng = np.random.default_rng(random_state)
+    at_least_as_extreme = 0
+    for _ in range(n_permutations):
+        shuffled = rng.permutation(sf)
+        stat = float(metric_fn(yt, yp, shuffled))
+        if stat >= observed - _FP_TOLERANCE:
+            at_least_as_extreme += 1
+    p_value = (1 + at_least_as_extreme) / (1 + n_permutations)
+    return observed, float(p_value)
 
 
 # =========================================================================== #
