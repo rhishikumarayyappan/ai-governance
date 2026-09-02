@@ -47,3 +47,6 @@ htmlcov/
 *.swp
 .idea/
 .vscode/
+
+# Generated validation output (numbers live in docs/VALIDATION_RESULTS.md)
+notebooks/validation_output.json

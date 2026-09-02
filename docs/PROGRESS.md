@@ -1,15 +1,58 @@
 # AI Governance Platform — Progress Log
 
 ## Current Status
-- **Phase 1 Week 2 — COMPLETE**
+- **Phase 1 — COMPLETE** (Weeks 1–2 + Week 3 benchmark validation)
+- Now working to **BUILD_PLAN v2.0** (10 phases, 9 gap categories, `docs/GAP_CHECKLIST.md` is the authoritative tracker)
 - Overall health: **Green**
 - **20 tests passing, 0 failures**
-- Last updated: 2026-09-01
-- Next: Phase 1 Week 3 — validation against published benchmarks (no new code)
+- Last updated: 2026-09-02
+- Next: **Phase 2 — Statistical Rigour Layer** (Days 26–40; closes Gap Category 1)
 
 ---
 
 ## Session Log
+
+### Session 6 — 2026-09-02 — Phase 1 Week 3: Benchmark Validation (COMPLETE)
+
+**Context:** BUILD_PLAN was replaced with v2.0 this session — phase count 6 → 10,
+LLM testing elevated to Phase 3, statistical rigour is now Phase 2, plus new
+`docs/GAP_CHECKLIST.md` tracking 94 gaps across 9 categories (87 closed in plan,
+7 deferred with risk statements). Phase 1 Week 3 validation is unchanged from
+v1.0 and was the assigned task.
+
+**What was done (no `governance/` code changed — validation only):**
+- `notebooks/validate_phase1.py` — runs the existing `BiasTestSuite` against
+  three public datasets, checks the headline metric against BUILD_PLAN v2.0
+  ranges, writes `notebooks/validation_output.json`.
+  - UCI Adult Income (`fairlearn.datasets.fetch_adult`), sex → LogisticRegression
+  - ProPublica COMPAS (live CSV from propublica/compas-analysis), race, ProPublica
+    row filter, African-American vs Caucasian → RandomForest
+  - UCI German Credit (`fetch_openml("credit-g")`), age dichotomised at 25 →
+    LogisticRegression
+- `docs/VALIDATION_RESULTS.md` — full write-up with per-dataset metric tables,
+  literature anchors, and known limitations (no CIs yet, thresholds not yet
+  justified, datasets frozen in time — Gap 9.5).
+
+**Results — all three headline metrics in published range:**
+| Dataset | Metric | Value | Expected |
+|---|---|---|---|
+| Adult Income | demographic_parity_difference | 0.1745 | 0.15–0.25 |
+| COMPAS | equalized_odds_difference | 0.1752 | 0.15–0.25 |
+| German Credit | demographic_parity_difference | 0.1149 | 0.05–0.20 |
+
+`pytest tests/ -q` → **20 passed, 0 failed** (unchanged).
+
+**Deferred Register reviewed** (mandatory at phase completion): no trigger
+conditions met.
+
+**Exact next step:** Begin **Phase 2 — Statistical Rigour Layer**. Open a fresh
+session, read `docs/BUILD_PLAN.md` (Phase 2 section), `docs/GAP_CHECKLIST.md`
+(Category 1), and `docs/PROGRESS.md`. Build `governance/testing/statistics.py`
+first (Component 2.1: chi-squared / Fisher / z-test / permutation + bootstrap CI
++ Bonferroni/BH + reliability). Then `THRESHOLDS.md`, then Simpson's paradox and
+`governance/compliance/tensions.py`. Phase 2 adds `scipy.stats` + `statsmodels`.
+
+---
 
 ### Session 1 — 2026-09-01 — Phase 0 Foundation (COMPLETE)
 - Environment: Homebrew (pre-existing), pyenv 2.8.4 installed + wired into `~/.zshrc`,
@@ -156,11 +199,12 @@ German Credit) and verify the numbers match published benchmarks within 5%.
 
 ### Phase 1 — Testing Engine
 
-BUILD_PLAN.md Phase 1 exit criteria:
-- [ ] BiasTestSuite.run() produces numbers within 5% of published Adult Income
-      benchmarks — **PENDING (Week 3)**
-- [ ] COMPAS false positive rate gap matches ProPublica within 5%
-      (African-American vs Caucasian) — **PENDING (Week 3)**
+BUILD_PLAN v2.0 Phase 1 exit criteria — **ALL MET (2026-09-02)**:
+- [x] Adult Income demographic_parity_difference in 0.15–0.25 → 0.1745
+- [x] COMPAS equalized_odds_difference in 0.15–0.25 → 0.1752
+- [x] German Credit demographic_parity_difference in 0.05–0.20 → 0.1149
+- [x] docs/VALIDATION_RESULTS.md created
+- [x] pytest → 20 passed, 0 failed
 - [x] All 5 metrics have pytest tests with hardcoded expected values
       (`tests/test_bias.py`)
 - [x] `governance/testing/engine.py` (Engine Orchestrator) built and working
@@ -170,16 +214,21 @@ BUILD_PLAN.md Phase 1 exit criteria:
 - [x] POST /api/v1/test-runs creates a TestRun in SQLite and triggers a run
 - [x] GET /api/v1/test-runs/{id}/results returns the saved results
 
-Progress: **7 / 9 done, 2 pending (both Week 3 benchmark validation).**
+Progress: **9 / 9 done — Phase 1 COMPLETE.**
 
 Component status:
 - [x] Component 1 — Model adapter layer (Sklearn, Pickle, API)
 - [x] Component 2 — BiasTestSuite with 5 metrics + Engine orchestrator
 - [x] Component 3 — API endpoints (POST /test-runs, GET status, GET results)
-- [ ] Week 3 — Validated against UCI Adult Income (within 5% of published)
-- [ ] Week 3 — Validated against COMPAS dataset (within 5% of ProPublica)
+- [x] Week 3 — Validated against UCI Adult Income (0.1745, in range)
+- [x] Week 3 — Validated against COMPAS (0.1752, in range) + German Credit (0.1149, in range)
 
-### Phase 2 — Compliance Mapper
+> **NOTE (2026-09-02):** the phase list below is the superseded v1.0 structure.
+> Under BUILD_PLAN v2.0, Phase 2 is the Statistical Rigour Layer and the
+> compliance mapper moves to Phase 5. `docs/GAP_CHECKLIST.md` is now the
+> authoritative tracker. The rows below are retained only for history.
+
+### Phase 2 (v1.0, superseded) — Compliance Mapper
 - [ ] eu_ai_act.json rules file complete (Articles 9,10,13,14,15)
 - [ ] gdpr.json rules file complete (Articles 22, 25)
 - [ ] ComplianceMapper engine built
