@@ -307,6 +307,25 @@ Five simultaneous tests inflate false-positive probability. Implement:
 - Store both `threshold` (raw) and `corrected_threshold` on every result
 - The compliance mapper uses the **corrected** threshold, always
 
+Implemented as `apply_multiple_comparisons_correction(p_values, method, alpha)`
+in `statistics.py`. Bonferroni returns a single `corrected_alpha = alpha/n`.
+Benjamini-Hochberg returns a per-comparison critical-value list `(rank/n)·alpha`
+and a **step-up** decision (largest rank *k* with `p_(k) ≤ (k/n)·alpha`, reject
+all rank ≤ *k*), so a hypothesis can be flagged significant even when its own
+p-value exceeds its own critical value.
+
+Worked example — five metrics, `alpha=0.05`:
+
+```python
+p_values = [0.001, 0.012, 0.025, 0.04, 0.2]
+apply_multiple_comparisons_correction(p_values, "bonferroni")        # significant: 1  (only p < 0.01)
+apply_multiple_comparisons_correction(p_values, "benjamini_hochberg")# significant: 4  (step-up climbs to rank 4)
+```
+
+BH only diverges from Bonferroni when there is a staircase of small p-values for
+the step-up to climb; on data with one clear signal and four clear nulls the two
+agree.
+
 ### Reliability Assessment
 
 > **Revised 2026-09-02 during Component 2.3 implementation** (was: "SD < 0.02 →

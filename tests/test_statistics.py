@@ -408,6 +408,9 @@ def test_benjamini_hochberg_matches_1995_paper():
 # Test 3 — BH is at least as permissive as Bonferroni on the same data
 # --------------------------------------------------------------------------- #
 def test_bh_is_less_conservative_than_bonferroni():
+    # BH only diverges from Bonferroni when there is a *staircase* of small-ish
+    # p-values that the step-up procedure can climb — not for any five numbers.
+    # Here Bonferroni flags 1 (only p < 0.01); BH climbs to rank 4 and flags 4.
     p_values = [0.001, 0.012, 0.025, 0.04, 0.2]
     bonf = apply_multiple_comparisons_correction(p_values, method="bonferroni")
     bh = apply_multiple_comparisons_correction(

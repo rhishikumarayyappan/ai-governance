@@ -1,22 +1,106 @@
 # AI Governance Platform — Progress Log
 
 ## Current Status
-- **Phase 2 — IN PROGRESS.** Significance testing DONE (gap 1.4). Bootstrap
-  confidence intervals DONE (gap 1.3).
+- **Phase 2 — IN PROGRESS.** `statistics.py` computation layer COMPLETE:
+  significance testing (1.4), bootstrap CIs (1.3), multiple-comparison
+  correction (1.1), reliability scoring (1.8).
 - Phase 1 COMPLETE (Weeks 1–2 + Week 3 benchmark validation).
 - Working to **BUILD_PLAN v2.0** (10 phases, 9 gap categories, `docs/GAP_CHECKLIST.md` is the authoritative tracker)
 - Overall health: **Green**
-- **34 tests passing, 0 failures** (~54s — bootstrap loops dominate)
+- **44 tests passing, 0 failures** (~53s — bootstrap loops dominate)
 - Last updated: 2026-09-02
-- Next: **Bonferroni + Benjamini-Hochberg correction** (gap 1.1), then
-  **reliability scoring** (gap 1.8, N-run SD three-tier flag; "insufficient_data"
-  blocks a verdict), both added to `statistics.py`. Then Component 2.2
-  (`THRESHOLDS.md`, gap 1.2), 2.3 (Simpson's paradox, gaps 1.5/9.9), 2.4
-  (`tensions.py`, gap 1.9).
+- Next: **Component 2.2 — `THRESHOLDS.md`** (gap 1.2, repo root; honest
+  "no regulatory basis" statement, per-system configurable, add the note that
+  permutation p-values are bounded away from 0 by design). Then **2.3 Simpson's
+  paradox** (gaps 1.5/9.9, added to `statistics.py`), then **2.4 `tensions.py`**
+  (gap 1.9). Then the wiring sub-step: CI / p-value / corrected threshold /
+  reliability flag onto `TestResult` rows (touches `bias.py`/`engine.py`/models
+  — first time this phase).
 
 ---
 
 ## Session Log
+
+### Session 9 — 2026-09-02 — Phase 2: Multiple-Comparison Correction + Reliability Scoring (COMPLETE)
+
+**Scope:** added to `statistics.py`; existing functions untouched. No `bias.py`
+/ `engine.py` / API changes. Also corrected `docs/BUILD_PLAN.md` (see below).
+
+**Built:**
+- `apply_multiple_comparisons_correction(p_values, method="bonferroni",
+  alpha=0.05) -> CorrectionResult` (gap 1.1)
+  - **Bonferroni:** `corrected_alpha` is a scalar `alpha/n`; `significant[i]` is
+    exactly `p_values[i] < corrected_alpha`.
+  - **Benjamini-Hochberg:** `corrected_alpha` is a per-comparison list
+    `(rank_i/n)·alpha` in original p-value order; `significant` follows the
+    **step-up** rule (largest rank `k` with `p_(k) ≤ (k/n)·alpha`, reject all
+    rank ≤ `k`). Consequence, deliberately: `significant[i]` can be `True` while
+    `p_values[i] > corrected_alpha[i]` — the #1 way BH is coded wrong, so it has
+    its own named test.
+  - Both hand-implemented (no library shortcut). `nan` / out-of-range / empty
+    `p_values` → `ValueError` (never silently coerced).
+  - Why correction is needed: 5 tests each at 5% → family-wise false-positive
+    rate ≈ 1 − 0.95⁵ ≈ **23%**. Roughly 1 in 4 fair models flagged on some
+    metric by chance without it.
+- `assess_reliability(bootstrap_result, sample_sizes, min_group_size=30)
+  -> ReliabilityAssessment` (gap 1.8)
+  - Tiers `reliable` / `unstable` / `insufficient_data`. All rules evaluated;
+    `reasons` accumulates every firing rule; `tier` = most severe.
+  - `blocks_verdict` True **iff** `insufficient_data`.
+  - Rules: (0) all resamples failed → insufficient; (1) any group < 30 →
+    insufficient; (2) >5% single-group-collapse resamples → insufficient;
+    (3) CI width > 0.15 → unstable; (4) bootstrap SD > 0.05 → unstable;
+    (5) else reliable (with a positive confirmation line, not an empty list).
+  - `unstable` vs `insufficient_data`: unstable = "here's the answer, treat it
+    as rough"; insufficient_data = "we can't answer this yet".
+
+**BUILD_PLAN.md corrected (same commit `d393647`):** the Reliability Assessment
+section was an under-specified draft — it folded "SD > 0.05" into
+`insufficient_data` and specified an N-run reseed. Revised to the implemented
+rule table with a dated note + reasoning: (a) a large SD is measured uncertainty
+on an estimate that *was* computed → `unstable`, categorically different from
+data that can't support an estimate; (b) SD read from the single 1,000-iter
+bootstrap already computed in Component 2.2 — an N-run reseed multiplies the
+~4s/metric cost by N for a redundant signal; (c) hard floor 30 not 100, since
+30–99 that's still too imprecise is caught by the CI-width and SD rules anyway.
+Also added a worked BH-vs-Bonferroni example to the Multiple Comparisons section.
+
+**Verification:**
+- Bonferroni: matches hand calc; `corrected_alpha` exactly `alpha/n`.
+- BH: matches **Benjamini & Hochberg (1995), JRSS-B 57(1):289–300, Table 1**
+  (Neuhaus cardiac-trial p-values) exactly — 4 rejections vs Bonferroni's 3.
+  Step-up divergence case (`[0.001, 0.04, 0.045, 0.05]` → all 4 significant)
+  has its own test.
+- Integration script: the prompt's literal p-values `[0.001, 0.03, 0.04, 0.20,
+  0.08]` make the two methods *agree* (only rank 1 clears its bar — no staircase
+  for step-up to climb). Per Rhishikumar: updated the worked example everywhere
+  to `[0.001, 0.012, 0.025, 0.04, 0.2]` (Bonferroni 1, BH 4) so the example
+  demonstrates the property it claims. The "BH only diverges on a staircase of
+  small p-values" fact is now a comment next to
+  `test_bh_is_less_conservative_than_bonferroni`.
+- Reliability: all 6 rules fire correctly; reasons accumulate; blocks_verdict
+  only on insufficient_data.
+- `pytest tests/ -v` → **44 passed, 0 failed** (~53s). Health 200.
+
+**Test count — 10 new, not 8 (approved).** 8 per brief + `test_bh_step_up_
+can_reject_above_own_critical_value` (the property flagged as the top BH bug —
+needs a named test so a later regression can't pass silently) + `test_invalid_
+p_values_raise` (enforces the point-5 decision that `nan` fails loudly). Both
+load-bearing, not padding.
+
+**Commits:** `d393647` (statistics.py + test_statistics.py + BUILD_PLAN.md).
+Pushed at EOD.
+
+**Exact next step:** Component 2.2 — write `THRESHOLDS.md` at repo root. Every
+threshold (0.10 fairness default, 0.80 individual-fairness floor, 30 min group
+size, 0.15 CI-width, 0.05 bootstrap-SD, 0.05 alpha): numeric value, source /
+reasoning (state plainly the 0.10 is an internal convention from the four-fifths
+rule with **no regulatory force**), who set it, whether per-customer
+configurable. Add the line that permutation p-values are bounded away from 0 by
+design (add-one smoothing). Then make thresholds per-`AISystem` configurable
+with an audit-log entry on change — that part touches the DB model.
+
+---
 
 ### Session 8 — 2026-09-02 — Phase 2: Bootstrap Confidence Intervals (COMPLETE)
 
@@ -392,16 +476,22 @@ Component 2.1 — Statistical Testing Module (`governance/testing/statistics.py`
 - [x] Validated against scipy reference outputs (bit-identical on chi-squared)
 - [x] Bootstrap confidence intervals (1,000 iterations) — generic
       `bootstrap_confidence_interval` + 5 metric wrappers + `METRIC_WRAPPERS`
-- [x] `tests/test_statistics.py` — 14 tests (8 significance + 6 bootstrap)
-- [ ] Bonferroni + Benjamini-Hochberg correction; `corrected_threshold`
-- [ ] Reliability scoring (N-run SD, three-tier flag); "insufficient_data" blocks verdict
+- [x] Bonferroni + Benjamini-Hochberg correction —
+      `apply_multiple_comparisons_correction` (BH validated vs B&H 1995 Table 1)
+- [x] Reliability scoring — `assess_reliability`, three-tier,
+      "insufficient_data" blocks verdict (rule set revised from BUILD_PLAN draft;
+      BUILD_PLAN.md updated to match)
+- [x] `tests/test_statistics.py` — 24 tests (8 significance + 6 bootstrap +
+      5 correction + 5 reliability)
+- [ ] Wire CI / p-value / corrected threshold / reliability flag onto
+      `TestResult` rows (separate sub-step — touches `bias.py`/`engine.py`/models)
 
 Component 2.2 — `THRESHOLDS.md` (not started). **Carry-over TODO:** note that
 permutation p-values are bounded away from zero by design (add-one smoothing).
 Component 2.3 — Simpson's paradox detection (not started).
 Component 2.4 — `governance/compliance/tensions.py` (not started).
 
-Gap tracker: **1.3, 1.4 ✅ closed.** 1.1, 1.2, 1.5, 1.8, 1.9, 9.9 still open — see
+Gap tracker: **1.1, 1.3, 1.4, 1.8 ✅ closed.** 1.2, 1.5, 1.9, 9.9 still open — see
 `docs/GAP_CHECKLIST.md`.
 
 ---
