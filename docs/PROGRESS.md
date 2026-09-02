@@ -1,19 +1,99 @@
 # AI Governance Platform — Progress Log
 
 ## Current Status
-- **Phase 2 — IN PROGRESS.** Component 2.1 (significance testing) COMPLETE.
+- **Phase 2 — IN PROGRESS.** Significance testing DONE (gap 1.4). Bootstrap
+  confidence intervals DONE (gap 1.3).
 - Phase 1 COMPLETE (Weeks 1–2 + Week 3 benchmark validation).
 - Working to **BUILD_PLAN v2.0** (10 phases, 9 gap categories, `docs/GAP_CHECKLIST.md` is the authoritative tracker)
 - Overall health: **Green**
-- **28 tests passing, 0 failures**
+- **34 tests passing, 0 failures** (~54s — bootstrap loops dominate)
 - Last updated: 2026-09-02
-- Next: **Phase 2 Component 2.1 continued** — bootstrap confidence intervals, then
-  Bonferroni + Benjamini-Hochberg correction, then reliability scoring. Then
-  Component 2.2 (`THRESHOLDS.md`), 2.3 (Simpson's paradox), 2.4 (`tensions.py`).
+- Next: **Bonferroni + Benjamini-Hochberg correction** (gap 1.1), then
+  **reliability scoring** (gap 1.8, N-run SD three-tier flag; "insufficient_data"
+  blocks a verdict), both added to `statistics.py`. Then Component 2.2
+  (`THRESHOLDS.md`, gap 1.2), 2.3 (Simpson's paradox, gaps 1.5/9.9), 2.4
+  (`tensions.py`, gap 1.9).
 
 ---
 
 ## Session Log
+
+### Session 8 — 2026-09-02 — Phase 2: Bootstrap Confidence Intervals (COMPLETE)
+
+**Scope:** bootstrap CIs only. Added to `governance/testing/statistics.py`;
+existing `significance_test` functions untouched. No changes to `bias.py` /
+`engine.py` / API. (Note: the prompt called this "Component 2.2"; the plan files
+bootstrap CIs under Component 2.1's "Confidence Intervals" subsection. `THRESHOLDS.md`
+is the real Component 2.2. Used the prompt's commit message verbatim as instructed.)
+
+**Built:**
+- `bootstrap_confidence_interval(metric_fn, y_true, y_pred, sensitive_features,
+  n_iterations=1000, confidence_level=0.95, random_state=None) -> BootstrapResult`
+  - Percentile bootstrap. **One** index draw with replacement per iteration,
+    applied to all three arrays → each synthetic row keeps its real
+    `(group, prediction, label)` triple (the joint relationship the metric
+    measures). `sensitive_features` coerced to a positional array first so a
+    pandas index can't misalign the draw.
+  - Percentile bounds generalised: `lower = (1-c)/2·100`, `upper = 100-lower`.
+  - Single seed threaded through one `np.random.default_rng` → same
+    `random_state` gives byte-identical results.
+- `BootstrapResult` — `point_estimate`, `ci_lower`, `ci_upper`,
+  `confidence_level`, `n_iterations`, `bootstrap_distribution_summary`
+  (`{min, max, std}` only — no mean/median, so `point_estimate` is unambiguously
+  "the" number), `n_valid_iterations`, `n_skipped_single_group`,
+  `reliability_warning`, `skip_breakdown`.
+- **Failure handling:** single-group resamples AND any `metric_fn` exception AND
+  non-finite values are **skipped, not fatal**, each counted by reason in
+  `skip_breakdown` (`{"single_group": n}`, `{"ValueError": n}`, …). >5% skipped
+  → `reliability_warning` set with the breakdown in prose. All iterations failed
+  → `ci_lower/upper = nan` + a specific warning ("all N iterations failed — CI
+  could not be computed, sample size or class balance likely insufficient"),
+  never an exception. Consistent with "insufficient_data degrades, doesn't crash".
+- **Five metric wrappers** to the `(y_true, y_pred, sensitive_features) -> float`
+  shape, calling fairlearn/sklearn directly (never `bias.py`):
+  `demographic_parity_wrapper` (abs, tolerates y_true=None),
+  `equalized_odds_wrapper`, `equal_opportunity_wrapper` (both abs, require
+  y_true), `predictive_parity_wrapper` (max-min group precision, mirrors
+  `bias.py` exactly including `zero_division=0` — so an empty-positive group
+  scores 0.0, does not raise), `individual_fairness_wrapper` (raw overall
+  accuracy 0-1, **no abs** — matches `bias.py`'s inverted-threshold metric 5).
+  `METRIC_WRAPPERS` dict keyed by the `bias.py` metric names.
+
+**Design decision — 4th top-level field `skip_breakdown`, approved by
+Rhishikumar.** Confirmed interface had 3 new fields; shipped 4. Reason: point 2
+asked for exception types to be recorded so a developer can tell "single group"
+(benign) from "metric error" (investigate). A `reliability_warning` string only
+exists above the 5% threshold and must be parsed when present — so skips at e.g.
+3% would be invisible as to cause. `skip_breakdown` is a structured dict, always
+populated (`{}` when clean). Approved as "better engineering than a string that
+only shows up sometimes", not scope creep.
+
+**Verification:**
+- Cross-validation (Step 5): n=5000, simulated true gap 0.20 → point estimate
+  **0.2081**, 95% CI **[0.1790, 0.2341]**, width 0.055. The bootstrap std
+  (0.0140) matches the analytic binomial difference-SE (~0.014) — this is the
+  real evidence the *spread* of the resampling is correct, stronger than the
+  point estimate matching the true gap. CI width ran ~0.055, a bit above the
+  prompt's "0.02–0.04" guess — expected: that guess was ~1.5× tight for
+  n≈2500/group.
+- `tests/test_statistics.py`: 6 new tests (14 in file, 34 total). CI contains
+  point estimate; narrow CI on large data (<0.05) + no false warning; small-data
+  CI >3× wider; all 5 wrappers valid; fixed seed byte-identical incl. summary
+  dict; single-group resamples skipped/tracked/flagged and reconciled.
+- `pytest tests/ -v` → **34 passed, 0 failed** (~54s). Health endpoint 200.
+
+**Commits:** `d198332` (statistics.py + test_statistics.py). Pushed at EOD.
+
+**Exact next step:** multiple-comparison correction (gap 1.1) added to
+`statistics.py` — Bonferroni (divide alpha by n_tests, conservative, default)
+and Benjamini-Hochberg FDR (offered as an option); store both raw `threshold`
+and `corrected_threshold`; the compliance mapper (Phase 5) will always use the
+corrected one. `statsmodels.stats.multitest.multipletests` is the reference to
+validate against (may add `statsmodels` as a dep, or hand-implement + validate).
+Then reliability scoring (gap 1.8). Still do NOT touch `bias.py` / `engine.py` /
+API until the explicit wiring sub-step later in Phase 2.
+
+---
 
 ### Session 7 — 2026-09-02 — Phase 2 Component 2.1: Significance Testing (COMPLETE)
 
@@ -310,8 +390,9 @@ Component 2.1 — Statistical Testing Module (`governance/testing/statistics.py`
 - [x] "auto" test selection by group count + expected cell size
 - [x] `assumptions_met` flag; always-on permutation cross-check
 - [x] Validated against scipy reference outputs (bit-identical on chi-squared)
-- [x] `tests/test_statistics.py` — 8 tests (6 behaviour + 2 guard rails)
-- [ ] Bootstrap confidence intervals (1,000 iterations) on all 5 metrics
+- [x] Bootstrap confidence intervals (1,000 iterations) — generic
+      `bootstrap_confidence_interval` + 5 metric wrappers + `METRIC_WRAPPERS`
+- [x] `tests/test_statistics.py` — 14 tests (8 significance + 6 bootstrap)
 - [ ] Bonferroni + Benjamini-Hochberg correction; `corrected_threshold`
 - [ ] Reliability scoring (N-run SD, three-tier flag); "insufficient_data" blocks verdict
 
@@ -320,7 +401,7 @@ permutation p-values are bounded away from zero by design (add-one smoothing).
 Component 2.3 — Simpson's paradox detection (not started).
 Component 2.4 — `governance/compliance/tensions.py` (not started).
 
-Gap tracker: 1.4 ✅ closed. 1.1, 1.2, 1.3, 1.5, 1.8, 1.9, 9.9 still open — see
+Gap tracker: **1.3, 1.4 ✅ closed.** 1.1, 1.2, 1.5, 1.8, 1.9, 9.9 still open — see
 `docs/GAP_CHECKLIST.md`.
 
 ---
