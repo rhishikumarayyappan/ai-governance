@@ -1,16 +1,96 @@
 # AI Governance Platform — Progress Log
 
 ## Current Status
-- **Phase 1 — COMPLETE** (Weeks 1–2 + Week 3 benchmark validation)
-- Now working to **BUILD_PLAN v2.0** (10 phases, 9 gap categories, `docs/GAP_CHECKLIST.md` is the authoritative tracker)
+- **Phase 2 — IN PROGRESS.** Component 2.1 (significance testing) COMPLETE.
+- Phase 1 COMPLETE (Weeks 1–2 + Week 3 benchmark validation).
+- Working to **BUILD_PLAN v2.0** (10 phases, 9 gap categories, `docs/GAP_CHECKLIST.md` is the authoritative tracker)
 - Overall health: **Green**
-- **20 tests passing, 0 failures**
+- **28 tests passing, 0 failures**
 - Last updated: 2026-09-02
-- Next: **Phase 2 — Statistical Rigour Layer** (Days 26–40; closes Gap Category 1)
+- Next: **Phase 2 Component 2.1 continued** — bootstrap confidence intervals, then
+  Bonferroni + Benjamini-Hochberg correction, then reliability scoring. Then
+  Component 2.2 (`THRESHOLDS.md`), 2.3 (Simpson's paradox), 2.4 (`tensions.py`).
 
 ---
 
 ## Session Log
+
+### Session 7 — 2026-09-02 — Phase 2 Component 2.1: Significance Testing (COMPLETE)
+
+**Scope:** significance testing only. No changes to `bias.py`, `engine.py`, or
+the API — verified. New file + new test file only.
+
+**Built — `governance/testing/statistics.py`:**
+- `significance_test(y_true, y_pred, sensitive_features, method="auto", *,
+  n_permutations=1000, random_state=None, cross_check=True) -> SignificanceResult`
+- `SignificanceResult` dataclass: `test_used`, `statistic`, `p_value`,
+  `significant` (p < 0.05, raw — correction is a later component), `assumptions_met`,
+  `sample_sizes` (per group), `detail` (dict).
+- Four tests:
+  1. **chi-squared** — `scipy.stats.chi2_contingency` with defaults (Yates
+     correction on for 2×2). Matches a direct `chi2_contingency(crosstab)` call
+     **bit-for-bit** (delta 0.00e+00 on the Step 5 cross-validation script).
+  2. **Fisher's exact** — `scipy.stats.fisher_exact`, two-sided, 2×2 only.
+     Matches scipy docs example to 1e-12. Raises `ValueError` pointing to
+     `permutation` for >2 groups.
+  3. **two-proportion z-test** — implemented manually (pooled SE, `norm.sf`).
+     Matches hand calculation to 1e-12. `assumptions_met=False` when
+     n·p̂ or n·(1−p̂) ≤ 5 for either group.
+  4. **permutation test** — 1,000 label shuffles, statistic is fairlearn's
+     `demographic_parity_difference` (imported direct from fairlearn, NOT from
+     `bias.py` — siblings never import each other). p-value uses **add-one
+     smoothing** `(1+k)/(1+n)` (Phipson & Smyth 2010), not raw `k/n`.
+- `method="auto"`: >2 groups → permutation; 2 groups + any expected cell <5 →
+  Fisher; else chi-squared.
+- **Always-on permutation cross-check** (`cross_check=True` default): a
+  permutation p-value is attached to `detail["permutation_p_value"]` on every
+  call, whatever the primary test, plus `cross_check_divergence`. Opt-out is
+  `cross_check=False` — deliberate and review-visible.
+
+**Tests — `tests/test_statistics.py`: 28 passed, 0 failed** (20 prior + 8 new).
+Six behaviour tests per the brief + two guard-rail tests (non-binary y_pred
+rejected; 2-group-only method with 3 groups raises). Cross-validated against
+scipy directly (Step 5). Health endpoint still 200.
+
+**Three design decisions — all reviewed and approved by Rhishikumar, rationale
+for the record:**
+1. **28 tests not 26.** The two guard-rail tests verify confirmed design points
+   2 and 3 (binary-only input; 2-group-only parametric tests). Testing a
+   confirmed design point is doing the job properly, not scope creep. Kept as
+   standalone tests — clearer than buried assertions.
+2. **Add-one smoothing on the permutation p-value.** Raw `k/n` can return
+   exactly `0.0`, which asserts a fairness gap "could never occur by chance" —
+   statistically indefensible and dangerous to state as fact in a
+   legal/regulatory context. `(1+k)/(1+n)` is bounded away from zero by design.
+   Phipson & Smyth 2010 is the standard citation (in the code comment).
+   **TODO for Component 2.2:** add one line to `THRESHOLDS.md` noting permutation
+   p-values are bounded away from zero by design.
+3. **`assumptions_met=False` on auto-mode Fisher fallback, `True` on explicit
+   Fisher call.** The flag doesn't answer "is Fisher valid" (always yes) — it
+   answers "did the caller get the test they implicitly expected, or did the
+   system have to correct course." A compliance reviewer needs to see the red
+   flag along the way, not just the final validity.
+
+**Known cost (not a problem to solve):** the always-on cross-check adds ~3.7s
+per `significance_test` call (1,000 × fairlearn's `demographic_parity_difference`,
+which is slow). Test suite went 1.7s → 16.8s. Acceptable — this is a compliance
+tool running test suites, not a live-request service. Vectorising the
+permutation loop would reopen the "does it match fairlearn exactly" question we
+deliberately closed by importing the metric directly. **Do not optimise unless
+it becomes a real blocker.**
+
+**Commits:** `e383182` (statistics.py + test_statistics.py). Pushed at EOD.
+
+**Exact next step:** continue Phase 2 Component 2.1 — bootstrap confidence
+intervals (1,000 iterations, 2.5/97.5 percentiles) on all 5 fairlearn metrics,
+added to `statistics.py`. Then Bonferroni + Benjamini-Hochberg correction (store
+raw `threshold` and `corrected_threshold`). Then reliability scoring (N-run SD,
+three-tier flag; "insufficient_data" blocks a verdict). `statsmodels` may be
+added here (`multipletests`) or corrections done by hand against a scipy
+reference. Still do NOT touch `bias.py` / `engine.py` / API until the wiring
+sub-step, which is explicitly called out later in Phase 2.
+
+---
 
 ### Session 6 — 2026-09-02 — Phase 1 Week 3: Benchmark Validation (COMPLETE)
 
@@ -222,6 +302,28 @@ Component status:
 - [x] Component 3 — API endpoints (POST /test-runs, GET status, GET results)
 - [x] Week 3 — Validated against UCI Adult Income (0.1745, in range)
 - [x] Week 3 — Validated against COMPAS (0.1752, in range) + German Credit (0.1149, in range)
+
+### Phase 2 — Statistical Rigour Layer (v2.0) — IN PROGRESS
+
+Component 2.1 — Statistical Testing Module (`governance/testing/statistics.py`):
+- [x] Significance testing — chi-squared, Fisher's exact, z-test, permutation
+- [x] "auto" test selection by group count + expected cell size
+- [x] `assumptions_met` flag; always-on permutation cross-check
+- [x] Validated against scipy reference outputs (bit-identical on chi-squared)
+- [x] `tests/test_statistics.py` — 8 tests (6 behaviour + 2 guard rails)
+- [ ] Bootstrap confidence intervals (1,000 iterations) on all 5 metrics
+- [ ] Bonferroni + Benjamini-Hochberg correction; `corrected_threshold`
+- [ ] Reliability scoring (N-run SD, three-tier flag); "insufficient_data" blocks verdict
+
+Component 2.2 — `THRESHOLDS.md` (not started). **Carry-over TODO:** note that
+permutation p-values are bounded away from zero by design (add-one smoothing).
+Component 2.3 — Simpson's paradox detection (not started).
+Component 2.4 — `governance/compliance/tensions.py` (not started).
+
+Gap tracker: 1.4 ✅ closed. 1.1, 1.2, 1.3, 1.5, 1.8, 1.9, 9.9 still open — see
+`docs/GAP_CHECKLIST.md`.
+
+---
 
 > **NOTE (2026-09-02):** the phase list below is the superseded v1.0 structure.
 > Under BUILD_PLAN v2.0, Phase 2 is the Statistical Rigour Layer and the

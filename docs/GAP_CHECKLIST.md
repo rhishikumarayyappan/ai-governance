@@ -16,7 +16,7 @@ Legend: ⬜ Not started · 🟡 In progress · ✅ Closed · ⏸️ Deferred (se
 | 1.1 | Multiple comparisons problem — 5 simultaneous tests inflate false positives | Bonferroni + Benjamini-Hochberg correction; compliance uses corrected threshold | 2 | ⬜ |
 | 1.2 | Thresholds arbitrary and legally undefended | THRESHOLDS.md with honest "no regulatory basis" statement; per-system configurable; changes audit-logged | 2 | ⬜ |
 | 1.3 | No confidence intervals — bare point estimates only | Bootstrap CI (1,000 iterations) on every metric; stored on every TestResult | 2 | ⬜ |
-| 1.4 | No significance testing — cannot distinguish real bias from noise | Chi-squared, Fisher's exact, two-proportion z-test, permutation test; p-value on every metric | 2 | ⬜ |
+| 1.4 | No significance testing — cannot distinguish real bias from noise | Chi-squared, Fisher's exact, two-proportion z-test, permutation test; p-value on every metric | 2 | ✅ |
 | 1.5 | Simpson's Paradox undetected — aggregate hides subgroup reversal | Automatic stratification by all low-cardinality columns; flag reversals | 2 | ⬜ |
 | 1.6 | Label bias unaddressed — biased ground truth treated as correct | label_bias.py — assess label distribution vs external base rates; flag enforcement-proxy labels | 4 | ⬜ |
 | 1.7 | Feedback loop bias undetectable | feedback_loop.py — correlate past decisions with training data composition shifts | 6 | ⬜ |
@@ -213,5 +213,6 @@ These four must be closed before a single euro changes hands. If forced to choos
 | Date | Phase Completed | Gaps Closed | Reviewer | Notes |
 |---|---|---|---|---|
 | 2026-09-02 | Phase 1 (Week 3 validation) | — (validation gate, no gap rows) | Rhishikumar | Adult 0.1745 / COMPAS 0.1752 / German 0.1149 — all in published range. `docs/VALIDATION_RESULTS.md` written. pytest 20/20. Deferred Register reviewed — no triggers fired. Phase 2 unblocked. |
+| 2026-09-02 | Phase 2 Component 2.1 (partial — significance testing) | 1.4 | Rhishikumar | `governance/testing/statistics.py`: chi-squared / Fisher / z-test / permutation + "auto" selector + always-on permutation cross-check. Chi-squared bit-identical to `scipy.chi2_contingency`; Fisher & z-test match to 1e-12; permutation converges within 0.005 across seeds. Permutation p-value uses add-one smoothing (Phipson & Smyth 2010) — bounded away from 0. pytest 28/28. Phase 2 NOT complete — 1.1, 1.2, 1.3, 1.5, 1.8, 1.9, 9.9 still open. |
 
 *Add a row at every phase completion. Review the Deferred Register at the same time and escalate any triggered item.*
