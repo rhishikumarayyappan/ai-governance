@@ -1,25 +1,98 @@
 # AI Governance Platform — Progress Log
 
 ## Current Status
-- **Phase 2 — IN PROGRESS.** `statistics.py` computation layer COMPLETE:
-  significance testing (1.4), bootstrap CIs (1.3), multiple-comparison
-  correction (1.1), reliability scoring (1.8).
+- **Phase 2 — IN PROGRESS.** `statistics.py` computation layer COMPLETE
+  (significance 1.4, bootstrap CIs 1.3, correction 1.1, reliability 1.8).
+  `THRESHOLDS.md` written (1.2 → 🟡 — doc done, per-system config + audit still to build).
 - Phase 1 COMPLETE (Weeks 1–2 + Week 3 benchmark validation).
 - Working to **BUILD_PLAN v2.0** (10 phases, 9 gap categories, `docs/GAP_CHECKLIST.md` is the authoritative tracker)
 - Overall health: **Green**
 - **44 tests passing, 0 failures** (~53s — bootstrap loops dominate)
 - Last updated: 2026-09-02
-- Next: **Component 2.2 — `THRESHOLDS.md`** (gap 1.2, repo root; honest
-  "no regulatory basis" statement, per-system configurable, add the note that
-  permutation p-values are bounded away from 0 by design). Then **2.3 Simpson's
-  paradox** (gaps 1.5/9.9, added to `statistics.py`), then **2.4 `tensions.py`**
-  (gap 1.9). Then the wiring sub-step: CI / p-value / corrected threshold /
-  reliability flag onto `TestResult` rows (touches `bias.py`/`engine.py`/models
-  — first time this phase).
+- Next: **Component 2.3 — Simpson's paradox detection** (gaps 1.5 / 9.9), added
+  to `statistics.py`: after an aggregate metric, stratify by every other
+  categorical column with < 10 unique values, recompute per stratum, flag when
+  the aggregate passes but a stratum fails or the direction reverses. Then
+  **2.4 `governance/compliance/tensions.py`** (gap 1.9, impossibility-theorem
+  awareness). Then the wiring sub-step (CI / p-value / corrected threshold /
+  reliability flag onto `TestResult`; per-system threshold config + audit for
+  the rest of 1.2 — first `bias.py` / `engine.py` / model changes this phase).
+- **Open discovered gaps:** 9.11 (0.7 band-splitter code clarity — small
+  follow-up), 9.12 (`individual_fairness_score` mislabelled — needs an owner
+  decision + its own `bias.py` session).
 
 ---
 
 ## Session Log
+
+### Session 10 — 2026-09-02 — Phase 2: THRESHOLDS.md (gap 1.2 → 🟡)
+
+**Scope:** documentation only. One new file, `THRESHOLDS.md`, at repo root. No
+`governance/` code changed — verified.
+
+**What was written:** every threshold / constant in `bias.py` and `statistics.py`
+that turns a measurement into a pass / warn / fail / block decision — 17 items,
+read from source on 2026-09-02, not from memory. Each has: exact value, source /
+reasoning (honest), who set it + when, configurability, and what changing it
+means. Structure: honest limitation statement near the top (no threshold here is
+mandated by any regulation; the EU AI Act sets no numeric fairness thresholds);
+how the pass/warn/fail bands work; Part 1 fairness thresholds; Part 2 statistical
+thresholds; structural findings; configuration roadmap; review table.
+
+**Threshold lineage, honestly stated:**
+- 0.10 (the 4 gap metrics) — US EEOC four-fifths rule (1978, 29 CFR §1607.4(D)),
+  a *ratio* rule (0.80) loosely ≈ 0.20 as a difference, then **halved** to 0.10
+  as an internal conservative choice with no external basis. Reused from US
+  employment law; applied by analogy to error-rate and precision gaps the
+  four-fifths rule never addressed.
+- 0.80 (`individual_fairness_score`) — **no external source.** Documented as an
+  internal engineering default. Likely a numeric echo of the 80% rule (category
+  error — that rule is about selection-rate ratios, not model accuracy).
+- alpha 0.05 / CI 0.95 — Fisher 1925 convention; as arbitrary as any alternative.
+- expected-cell-count 5, z-test min-count 5 — genuine stats conventions (Cochran).
+- min_group_size 30 — CLT rule of thumb + Component 2.3 reasoning.
+- CI-width 0.15, bootstrap-SD 0.05, skip 0.05/0.05 — engineering judgment calls
+  made this build, no external standard, stated as such.
+- 1000 iterations — Efron & Tibshirani common practice.
+- permutation add-one smoothing — the Session 7 carry-over TODO; documented as a
+  deliberate floor (p ≥ 1/1001), Phipson & Smyth 2010.
+
+**Two structural findings surfaced during the audit — both tracked, not fixed:**
+- **Gap 9.11 (🟡 partial):** `_get_status()` has a hard-coded `0.7` multiplier —
+  the real **pass** boundary for the 4 gap metrics is **0.07**, not the `0.10`
+  in `DEFAULT_THRESHOLDS` (that's only the fail line; 0.07–0.10 is a warn band).
+  This existed nowhere in writing until now. Documented in THRESHOLDS.md #6.
+  Code-clarity fix (name the constant `PASS_BAND_FRACTION`, docstring the
+  function) is a small tracked follow-up — information gap closed, code-readability
+  gap not.
+- **Gap 9.12 (⬜ open):** `individual_fairness_score` computes
+  `MetricFrame(accuracy_score).overall` — **overall model accuracy**, not
+  individual consistency ("similar people get similar predictions"), and it
+  doesn't even compare groups. The metric does not test what its name claims.
+  Owner decision required: (a) rename + update downstream, or (b) build a real
+  consistency metric under the name. Not fixed here — the metric name has already
+  been used in Phase 1's validated benchmark runs and will feed the (not-yet-built)
+  compliance mapper, reports, and customer language; renaming is a real decision
+  needing its own scoped `bias.py` session, not a rider on a doc task.
+
+**Why 1.2 is 🟡 not ✅:** its fix definition is "THRESHOLDS.md + per-system
+configurable + changes audit-logged". The doc is done; per-system persistence
+and the audit trail are not (BUILD_PLAN lists them as a separate exit-criteria
+line). Honest partial, consistent with how 1.3 was tracked.
+
+**Commits:** `51d3f3e` (THRESHOLDS.md + GAP_CHECKLIST.md 9.11/9.12 + totals
+94→96). Pushed at EOD.
+
+**Exact next step:** Component 2.3 — Simpson's paradox detection in
+`statistics.py`. After computing an aggregate fairness metric, stratify by every
+other categorical column with < 10 unique values, recompute the metric within
+each stratum, and flag when (a) the aggregate passes but a stratum exceeds the
+threshold, or (b) the aggregate direction reverses in a stratum. Output a
+plain-language warning naming the stratum and both values. Then a test with a
+planted subgroup reversal. Closes gaps 1.5 and 9.9. Still no `bias.py` /
+`engine.py` / API changes until the wiring sub-step.
+
+---
 
 ### Session 9 — 2026-09-02 — Phase 2: Multiple-Comparison Correction + Reliability Scoring (COMPLETE)
 
@@ -486,13 +559,14 @@ Component 2.1 — Statistical Testing Module (`governance/testing/statistics.py`
 - [ ] Wire CI / p-value / corrected threshold / reliability flag onto
       `TestResult` rows (separate sub-step — touches `bias.py`/`engine.py`/models)
 
-Component 2.2 — `THRESHOLDS.md` (not started). **Carry-over TODO:** note that
-permutation p-values are bounded away from zero by design (add-one smoothing).
+Component 2.2 — `THRESHOLDS.md` **written** (gap 1.2 → 🟡). Permutation-p-value
+add-one-smoothing carry-over TODO from Session 7: **done** (#16 in the file).
+Remaining for 1.2: per-system threshold config + audit-log on change.
 Component 2.3 — Simpson's paradox detection (not started).
 Component 2.4 — `governance/compliance/tensions.py` (not started).
 
-Gap tracker: **1.1, 1.3, 1.4, 1.8 ✅ closed.** 1.2, 1.5, 1.9, 9.9 still open — see
-`docs/GAP_CHECKLIST.md`.
+Gap tracker: **1.1, 1.3, 1.4, 1.8 ✅ closed.** 1.2 🟡 (doc done). 1.5, 1.9, 9.9
+still open. Discovered: 9.11 🟡, 9.12 ⬜. See `docs/GAP_CHECKLIST.md`.
 
 ---
 
