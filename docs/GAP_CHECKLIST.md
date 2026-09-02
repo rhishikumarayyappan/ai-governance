@@ -171,7 +171,8 @@ Legend: ⬜ Not started · 🟡 In progress · ✅ Closed · ⏸️ Deferred (se
 | 9.9 | Simpson's Paradox | Covered in 1.5 | 2 | ✅ |
 | 9.10 | Model version lineage untracked | model_versions table with hash chain | 4 | ⬜ |
 | 9.11 | Threshold band-splitter constant (`0.7`) was undocumented in code — the real pass boundary for the 4 gap metrics is **0.07**, not the `0.10` in `DEFAULT_THRESHOLDS`. Discovered during the `THRESHOLDS.md` audit (2026-09-02). | Documented fully in `THRESHOLDS.md` (#6). Code-level fix — name the constant (`PASS_BAND_FRACTION = 0.7`) + docstring `_get_status()` so the warn band is legible from source. Small, not urgent, must not be forgotten. | 2 | 🟡 |
-| 9.12 | `individual_fairness_score` is mislabelled — measures overall model accuracy (`MetricFrame.overall`), **not** individual consistency ("similar people get similar predictions"). Every compliance report using this metric name may mislead a reader about what was tested. Discovered during the `THRESHOLDS.md` audit (2026-09-02). | **Owner decision required, not housekeeping:** (a) rename to something accurate (e.g. `overall_accuracy_floor`) + update compliance mapper and reports; OR (b) build a genuine individual-fairness consistency metric (e.g. nearest-neighbour comparison across the protected attribute) under the current name. Do NOT silently rename. Own scoped `bias.py` session. | 2 | ⬜ |
+| 9.12 | `individual_fairness_score` is **mislabelled** — it measures overall model accuracy (`MetricFrame.overall`), not individual consistency ("similar people get similar predictions"). Discovered during the `THRESHOLDS.md` audit (2026-09-02). | **Rename** `individual_fairness_score` → an accurate name (e.g. `overall_accuracy_floor`) across `bias.py`, `statistics.py` (`individual_fairness_wrapper` + `METRIC_WRAPPERS` key), test files, `THRESHOLDS.md` #5, `VALIDATION_RESULTS.md`, and the note in `detect_metric_tensions`. Decision (owner, 2026-09-02): **rename only** — the genuine metric is a Phase 4 feature (9.13), not part of this fix. Own scoped session, **before** the `TestResult` wiring sub-step. | 2 | ⬜ |
+| 9.13 | No **genuine** individual-fairness metric — nothing measures whether similar individuals receive similar predictions (a consistency property). The renamed `overall_accuracy_floor` (9.12) is a performance floor, not a fairness measure. | Build a consistency metric — for each individual, k-nearest-neighbours *in the other protected group* (distance with the protected attribute excluded), measure whether predictions match; `1 − mean(inconsistency)`, inverted threshold. **Scope estimate (2026-09-02):** ~30 lines of metric maths; the cost is interface — thread the feature matrix `X` into `BiasTestSuite.run()` (engine already computes `features = X_test.drop(columns=protected)`) and expand past the "exactly 5, fixed order" contract; `sklearn.neighbors.NearestNeighbors` + `StandardScaler` (no new hard deps; optional `gower` for mixed types); new `k` and threshold constants → 2 `THRESHOLDS.md` entries; ~6–8 tests + benchmark validation on a known dataset. **~1–2 days.** Fits alongside `intersectional.py` and the other Phase 4 testing modules. | 4 | ⬜ |
 
 ---
 
@@ -184,17 +185,18 @@ No phase may begin until the previous phase's gaps are all ticked.
 | Phase 1 (Week 3) | Validation ✅ passed 2026-09-02 | — | Phase 2 |
 | Phase 2 | 1.1, 1.2, 1.3, 1.4, 1.5, 1.8, 1.9, 9.9 | 8 | Phase 3 |
 | Phase 3 | 2.6, 2.7, 3.1–3.16 | 18 | Phase 4 |
-| Phase 4 | 1.6, 2.1, 2.2, 4.1–4.7, 6.1, 6.2, 6.3, 6.5, 6.7, 9.1, 9.2, 9.4, 9.6, 9.10 | 21 | Phase 5 |
+| Phase 4 | 1.6, 2.1, 2.2, 4.1–4.7, 6.1, 6.2, 6.3, 6.5, 6.7, 9.1, 9.2, 9.4, 9.6, 9.10, 9.13 | 22 | Phase 5 |
 | Phase 5 | 5.1–5.10, 6.4, 9.5, 9.7, 9.8 | 14 | Phase 6 |
 | Phase 6 | 1.7, 2.5, 8.5, 8.6, 8.7, 8.8, 8.9, 9.3 | 8 | Phase 7 |
 | Phase 7 | 6.6, 6.8, 6.9, 6.10, 7.1–7.10, 8.1, 8.2, 8.3, 8.4 | 18 | First customer |
 | Deferred | 2.3, 2.4, 4.8, 6.11, 7.11, 7.12, 8.10 | 7 | See Deferred Register |
 
-**Total gaps identified: 96** (94 from the architectural review + 9.11, 9.12
-discovered during Phase 2 implementation)
+**Total gaps identified: 97** (94 from the architectural review + 9.11, 9.12,
+9.13 discovered during Phase 2 implementation)
 **Closed in build plan: 87**
 **Explicitly deferred with risk statement: 7**
-**Discovered during implementation, tracked: 2** (9.11 partial, 9.12 open)
+**Discovered during implementation, tracked: 3** (9.11 partial, 9.12 rename next
+session, 9.13 assigned to Phase 4)
 **Silently ignored: 0**
 
 ---
