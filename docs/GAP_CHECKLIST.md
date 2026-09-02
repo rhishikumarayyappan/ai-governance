@@ -170,6 +170,8 @@ Legend: ⬜ Not started · 🟡 In progress · ✅ Closed · ⏸️ Deferred (se
 | 9.8 | Human-in-the-loop operational effectiveness unverifiable | Override-rate analysis + explicit honest scope statement | 5 | ⬜ |
 | 9.9 | Simpson's Paradox | Covered in 1.5 | 2 | ⬜ |
 | 9.10 | Model version lineage untracked | model_versions table with hash chain | 4 | ⬜ |
+| 9.11 | Threshold band-splitter constant (`0.7`) was undocumented in code — the real pass boundary for the 4 gap metrics is **0.07**, not the `0.10` in `DEFAULT_THRESHOLDS`. Discovered during the `THRESHOLDS.md` audit (2026-09-02). | Documented fully in `THRESHOLDS.md` (#6). Code-level fix — name the constant (`PASS_BAND_FRACTION = 0.7`) + docstring `_get_status()` so the warn band is legible from source. Small, not urgent, must not be forgotten. | 2 | 🟡 |
+| 9.12 | `individual_fairness_score` is mislabelled — measures overall model accuracy (`MetricFrame.overall`), **not** individual consistency ("similar people get similar predictions"). Every compliance report using this metric name may mislead a reader about what was tested. Discovered during the `THRESHOLDS.md` audit (2026-09-02). | **Owner decision required, not housekeeping:** (a) rename to something accurate (e.g. `overall_accuracy_floor`) + update compliance mapper and reports; OR (b) build a genuine individual-fairness consistency metric (e.g. nearest-neighbour comparison across the protected attribute) under the current name. Do NOT silently rename. Own scoped `bias.py` session. | 2 | ⬜ |
 
 ---
 
@@ -188,9 +190,11 @@ No phase may begin until the previous phase's gaps are all ticked.
 | Phase 7 | 6.6, 6.8, 6.9, 6.10, 7.1–7.10, 8.1, 8.2, 8.3, 8.4 | 18 | First customer |
 | Deferred | 2.3, 2.4, 4.8, 6.11, 7.11, 7.12, 8.10 | 7 | See Deferred Register |
 
-**Total gaps identified: 94**
+**Total gaps identified: 96** (94 from the architectural review + 9.11, 9.12
+discovered during Phase 2 implementation)
 **Closed in build plan: 87**
 **Explicitly deferred with risk statement: 7**
+**Discovered during implementation, tracked: 2** (9.11 partial, 9.12 open)
 **Silently ignored: 0**
 
 ---
